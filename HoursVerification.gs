@@ -49,23 +49,28 @@ const REGION_TINTS = [
   '#fce4ec'  // Light Pink
 ];
 
-function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Hours Verification')
-    .addItem('Run 02/05 - 02/18', 'run02_05to02_18')
-    .addItem('Run Custom Date Range...', 'promptDateRange')
-    .addSeparator()
-    .addItem('Setup Gusto Import Tab', 'setupGustoImportTab')
-    .addItem('Compare Gusto Hours', 'compareGustoHours')
-    .addSeparator()
-    .addItem('Generate Hours Tracker 02/05 - 02/18', 'generateHoursTracker02_05to02_18')
-    .addItem('Generate Hours Tracker (Custom Range)...', 'promptHoursTrackerDateRange')
-    .addSeparator()
-    .addItem('Send Daily Slack Alert', 'sendDailySlackAlert')
-    .addItem('Send Weekly Slack Summary', 'sendWeeklySlackSummary')
-    .addSeparator()
-    .addItem('Setup Auto Triggers (Daily + Weekly)', 'setupTriggers')
-    .addItem('Remove All Triggers', 'removeTriggers')
-    .addToUi();
+function onOpen(e) {
+  try {
+    SpreadsheetApp.getUi().createMenu('Hours Verification')
+      .addItem('Run 02/05 - 02/18', 'run02_05to02_18')
+      .addItem('Run Custom Date Range...', 'promptDateRange')
+      .addSeparator()
+      .addItem('Setup Gusto Import Tab', 'setupGustoImportTab')
+      .addItem('Compare Gusto Hours', 'compareGustoHours')
+      .addSeparator()
+      .addItem('Generate Hours Tracker 02/05 - 02/18', 'generateHoursTracker02_05to02_18')
+      .addItem('Generate Hours Tracker (Custom Range)...', 'promptHoursTrackerDateRange')
+      .addItem('🔍 Debug SCOOT Detection', 'debugScootDetection')
+      .addSeparator()
+      .addItem('Send Daily Slack Alert', 'sendDailySlackAlert')
+      .addItem('Send Weekly Slack Summary', 'sendWeeklySlackSummary')
+      .addSeparator()
+      .addItem('Setup Auto Triggers (Daily + Weekly)', 'setupTriggers')
+      .addItem('Remove All Triggers', 'removeTriggers')
+      .addToUi();
+  } catch (err) {
+    Logger.log('onOpen: no UI context — ' + err.message);
+  }
 }
 
 // ---- MAIN ENTRY: 02/05-02/18 ----
@@ -902,6 +907,67 @@ function promptHoursTrackerDateRange() {
 }
 
 /**
+ * Diagnostic: scans all check-in sheets and reports every unique status
+ * that contains "scoot", plus sample rows. Shows results in an alert.
+ */
+function debugScootDetection() {
+  var startDate = new Date(2026, 1, 5);
+  var endDate = new Date(2026, 1, 18, 23, 59, 59);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var scootRows = [];
+  var allStatuses = {};
+
+  for (var s = 0; s < sheets.length; s++) {
+    var sheet = sheets[s];
+    var name = sheet.getName();
+    if (name === HOURS_TRACKER_TAB || name === SCOOT_HOURS_TAB || name === 'Auto Verification') continue;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) continue;
+
+    var hdr = data[0];
+    var cStatus = -1, cLeader = -1, cSchool = -1, cDate = -1;
+    for (var h = 0; h < hdr.length; h++) {
+      var col = String(hdr[h]).toLowerCase().trim();
+      if (col.indexOf('status') >= 0 && cStatus === -1) cStatus = h;
+      if ((col.indexOf('leader') >= 0 || col.indexOf('name') >= 0) && cLeader === -1) cLeader = h;
+      if (col.indexOf('school') >= 0 && cSchool === -1) cSchool = h;
+      if (col.indexOf('date') >= 0 && cDate === -1) cDate = h;
+    }
+    if (cStatus === -1 || cLeader === -1) continue;
+
+    for (var i = 1; i < data.length; i++) {
+      var status = String(data[i][cStatus] || '').toLowerCase().trim();
+      if (!status) continue;
+      allStatuses[status] = (allStatuses[status] || 0) + 1;
+      if (status.indexOf('scoot') >= 0) {
+        var leader = String(data[i][cLeader] || '').trim();
+        var school = cSchool >= 0 ? String(data[i][cSchool] || '').trim() : '?';
+        var dt = cDate >= 0 ? String(data[i][cDate] || '') : '?';
+        scootRows.push(name + ': ' + leader + ' | ' + school + ' | ' + status + ' | ' + dt);
+      }
+    }
+  }
+
+  var msg = '=== ALL UNIQUE STATUSES ===\n';
+  var keys = Object.keys(allStatuses).sort();
+  for (var k = 0; k < keys.length; k++) {
+    msg += keys[k] + ' (' + allStatuses[keys[k]] + ')\n';
+  }
+  msg += '\n=== SCOOT ROWS FOUND: ' + scootRows.length + ' ===\n';
+  for (var r = 0; r < Math.min(scootRows.length, 20); r++) {
+    msg += scootRows[r] + '\n';
+  }
+
+  Logger.log(msg);
+  try {
+    SpreadsheetApp.getUi().alert('SCOOT Debug', msg, SpreadsheetApp.getUi().ButtonSet.OK);
+  } catch(e) {
+    Logger.log('Could not show alert.');
+  }
+}
+
+/**
  * Main Hours Tracker function.
  * Loads check-in + Ops Hub data, splits into leaders vs scoot,
  * and writes two tabs: "Hours Tracker" and "SCOOT Hours".
@@ -1141,11 +1207,17 @@ function writeHoursTrackerTab_(hvSS, data, tabName, isScoot, dateRange) {
     return;
   }
 
+  // === SCOOT: simple invoice-verification layout ===
+  if (isScoot) {
+    writeScootInvoiceTab_(tab, data, dateRange);
+    return;
+  }
+
   var regions = groupByRegion_(data);
   var regionNames = Object.keys(regions).sort();
 
   // =============== SECTION A: SUMMARY ===============
-  var titleLabel = isScoot ? 'SCOOT HOURS' : 'HOURS TRACKER';
+  var titleLabel = 'HOURS TRACKER';
   tab.getRange(1, 1).setValue(titleLabel + ' — ' + dateRange);
   tab.getRange(1, 1, 1, 8).merge();
   tab.getRange(1, 1).setFontSize(14).setFontWeight('bold')
@@ -1257,6 +1329,77 @@ function writeHoursTrackerTab_(hvSS, data, tabName, isScoot, dateRange) {
 
   // Auto-resize columns and freeze header rows
   for (var c = 1; c <= 8; c++) tab.autoResizeColumn(c);
+  tab.setFrozenRows(4);
+}
+
+/**
+ * Writes a simple SCOOT invoice-verification tab.
+ * SCOOT bills 3 hours per session, so we just need: Person, School, Date.
+ */
+function writeScootInvoiceTab_(tab, data, dateRange) {
+  // Title
+  tab.getRange(1, 1).setValue('SCOOT HOURS — ' + dateRange);
+  tab.getRange(1, 1, 1, 4).merge();
+  tab.getRange(1, 1).setFontSize(14).setFontWeight('bold')
+    .setBackground('#ff6d01').setFontColor('#ffffff');
+
+  tab.getRange(2, 1).setValue('Generated: ' + new Date().toLocaleString() + ' | SCOOT bills 3 hours per session | Total sessions: ' + data.length);
+  tab.getRange(2, 1, 1, 4).merge().setFontColor('#666666');
+
+  // Headers
+  var headers = ['Person', 'School', 'Date', 'Workshop'];
+  tab.getRange(4, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e8eaed');
+
+  // Sort by person, then date
+  data.sort(function(a, b) {
+    var nameA = a.leader.toLowerCase(), nameB = b.leader.toLowerCase();
+    if (nameA < nameB) return -1;
+    if (nameA > nameB) return 1;
+    if (a.date && b.date) return a.date.getTime() - b.date.getTime();
+    return 0;
+  });
+
+  // Write rows
+  var row = 5;
+  var currentPerson = '';
+  var personColor = 0;
+  for (var i = 0; i < data.length; i++) {
+    var d = data[i];
+    // Alternate tint per person for readability
+    if (d.leader !== currentPerson) {
+      currentPerson = d.leader;
+      personColor = (personColor + 1) % REGION_TINTS.length;
+    }
+    tab.getRange(row, 1, 1, 4).setValues([[d.leader, d.school, d.dateStr, d.workshop]]);
+    tab.getRange(row, 1, 1, 4).setBackground(REGION_TINTS[personColor]);
+    row++;
+  }
+
+  // Summary: count per person
+  row += 1;
+  tab.getRange(row, 1).setValue('SUMMARY');
+  tab.getRange(row, 1, 1, 4).merge();
+  tab.getRange(row, 1).setFontSize(12).setFontWeight('bold').setBackground('#34a853').setFontColor('#ffffff');
+  row++;
+  tab.getRange(row, 1, 1, 3).setValues([['Person', 'Sessions', 'Billed Hours (3h each)']]).setFontWeight('bold').setBackground('#e8eaed');
+  row++;
+
+  var counts = {};
+  for (var i = 0; i < data.length; i++) {
+    counts[data[i].leader] = (counts[data[i].leader] || 0) + 1;
+  }
+  var names = Object.keys(counts).sort();
+  for (var n = 0; n < names.length; n++) {
+    tab.getRange(row, 1, 1, 3).setValues([[names[n], counts[names[n]], counts[names[n]] * 3]]);
+    row++;
+  }
+
+  // Total row
+  tab.getRange(row, 1, 1, 3).setValues([['TOTAL', data.length, data.length * 3]]);
+  tab.getRange(row, 1, 1, 3).setFontWeight('bold').setBackground('#e8eaed');
+
+  // Auto-resize and freeze
+  for (var c = 1; c <= 4; c++) tab.autoResizeColumn(c);
   tab.setFrozenRows(4);
 }
 
@@ -1532,9 +1675,16 @@ function setupTriggers() {
     .atHour(18)
     .create();
 
-  Logger.log('Triggers created: daily at 8 PM + weekly Friday at 6 PM');
+  // Hours Tracker daily at 6 PM
+  ScriptApp.newTrigger('generateHoursTracker02_05to02_18')
+    .timeBased()
+    .everyDays(1)
+    .atHour(18)
+    .create();
+
+  Logger.log('Triggers created: daily at 8 PM + weekly Friday at 6 PM + hours tracker daily at 6 PM');
   try {
-    SpreadsheetApp.getUi().alert('Triggers set up!\n\n• Daily alert: Every day at 8 PM\n• Weekly summary: Every Friday at 6 PM\n\nMake sure your Slack webhook URL is configured in the script.');
+    SpreadsheetApp.getUi().alert('Triggers set up!\n\n• Daily alert: Every day at 8 PM\n• Weekly summary: Every Friday at 6 PM\n• Hours Tracker: Daily at 6 PM\n\nMake sure your Slack webhook URL is configured in the script.');
   } catch(e) {
     Logger.log('Triggers created successfully.');
   }
@@ -1547,7 +1697,7 @@ function removeTriggers() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     var funcName = triggers[i].getHandlerFunction();
-    if (funcName === 'sendDailySlackAlert' || funcName === 'sendWeeklySlackSummary') {
+    if (funcName === 'sendDailySlackAlert' || funcName === 'sendWeeklySlackSummary' || funcName === 'generateHoursTracker02_05to02_18') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
