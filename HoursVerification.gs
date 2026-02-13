@@ -1052,12 +1052,17 @@ function generateHoursTracker(startDate, endDate) {
 
   log.push('Leader sessions: ' + leaderData.length);
   log.push('SCOOT sessions: ' + scootData.length);
+  Logger.log('DEBUG — leaderData: ' + leaderData.length + ', scootData: ' + scootData.length);
+  if (scootData.length > 0) {
+    Logger.log('DEBUG — First scoot entry: ' + scootData[0].leader + ' / status=' + scootData[0].status);
+  }
 
   // STEP 4: Write both tabs
   var hvSS = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
   var dateRange = formatDt(startDate) + ' – ' + formatDt(endDate);
 
   writeHoursTrackerTab_(hvSS, leaderData, HOURS_TRACKER_TAB, false, dateRange);
+  SpreadsheetApp.flush();  // Force pending writes before starting second tab
   writeHoursTrackerTab_(hvSS, scootData, SCOOT_HOURS_TAB, true, dateRange);
 
   log.push('\n=== COMPLETE ===');
@@ -1127,6 +1132,7 @@ function writeHoursTrackerTab_(hvSS, data, tabName, isScoot, dateRange) {
   } else {
     tab.clear();
     tab.clearFormats();
+    SpreadsheetApp.flush();  // Ensure clear completes before writing
   }
 
   if (data.length === 0) {
