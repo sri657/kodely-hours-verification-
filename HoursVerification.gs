@@ -21,11 +21,33 @@ const SHEET_URL = 'https://docs.google.com/spreadsheets/d/' + HOURS_VERIFICATION
 const GUSTO_IMPORT_TAB = 'Gusto Import';
 const DISCREPANCIES_TAB = 'Discrepancies';
 
-// --- Phase 4: Gusto API Configuration ---
-const GUSTO_API_BASE = 'https://api.gusto.com';
-const GUSTO_SANDBOX_BASE = 'https://api.gusto-demo.com';
-const GUSTO_USE_SANDBOX = true; // Set to false for production
-const GUSTO_API_VERSION = '2024-03-01';
+// --- Hours Tracker Configuration ---
+const HOURS_TRACKER_TAB = 'Hours Tracker';
+const SCOOT_HOURS_TAB = 'SCOOT Hours';
+
+// Region header colors (bold, saturated — for region header rows)
+const REGION_COLORS = [
+  '#4285f4', // Blue
+  '#34a853', // Green
+  '#ea4335', // Red
+  '#fbbc04', // Yellow
+  '#ff6d01', // Orange
+  '#46bdc6', // Teal
+  '#9334e6', // Purple
+  '#e91e63'  // Pink
+];
+
+// Region tint colors (light — for data rows under each region)
+const REGION_TINTS = [
+  '#d0e0fc', // Light Blue
+  '#ceead6', // Light Green
+  '#fad2cf', // Light Red
+  '#fef7cd', // Light Yellow
+  '#ffe0cc', // Light Orange
+  '#d4f0f3', // Light Teal
+  '#e9d5fb', // Light Purple
+  '#fce4ec'  // Light Pink
+];
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Hours Verification')
@@ -35,10 +57,8 @@ function onOpen() {
     .addItem('Setup Gusto Import Tab', 'setupGustoImportTab')
     .addItem('Compare Gusto Hours', 'compareGustoHours')
     .addSeparator()
-    .addItem('Authorize Gusto', 'authorizeGusto')
-    .addItem('Sync Hours from Gusto', 'syncGustoHours')
-    .addItem('Gusto Connection Status', 'checkGustoStatus')
-    .addItem('Disconnect Gusto', 'disconnectGusto')
+    .addItem('Generate Hours Tracker 02/05 - 02/18', 'generateHoursTracker02_05to02_18')
+    .addItem('Generate Hours Tracker (Custom Range)...', 'promptHoursTrackerDateRange')
     .addSeparator()
     .addItem('Send Daily Slack Alert', 'sendDailySlackAlert')
     .addItem('Send Weekly Slack Summary', 'sendWeeklySlackSummary')
@@ -850,442 +870,388 @@ function writeDiscrepanciesReport(ss, results, flagged, unmatched, matchedCount,
 }
 
 // =====================================================
-// PHASE 4: GUSTO API INTEGRATION
+// HOURS TRACKER — Auto-generated region-grouped tabs
 // =====================================================
 
 /**
- * Creates and configures the OAuth2 service for Gusto API.
- * Requires the OAuth2 library: 1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF
- * Credentials are read from Script Properties (GUSTO_CLIENT_ID, GUSTO_CLIENT_SECRET).
+ * Menu entry: generate Hours Tracker for the fixed 02/05–02/18 pay period.
  */
-function getGustoService_() {
-  var props = PropertiesService.getScriptProperties();
-  var clientId = props.getProperty('GUSTO_CLIENT_ID');
-  var clientSecret = props.getProperty('GUSTO_CLIENT_SECRET');
-
-  if (!clientId || !clientSecret) {
-    throw new Error('Gusto credentials not configured. Set GUSTO_CLIENT_ID and GUSTO_CLIENT_SECRET in Script Properties.');
-  }
-
-  var baseUrl = GUSTO_USE_SANDBOX ? GUSTO_SANDBOX_BASE : GUSTO_API_BASE;
-
-  return OAuth2.createService('gusto')
-    .setAuthorizationBaseUrl(baseUrl + '/oauth/authorize')
-    .setTokenUrl(baseUrl + '/oauth/token')
-    .setClientId(clientId)
-    .setClientSecret(clientSecret)
-    .setCallbackFunction('gustoAuthCallback')
-    .setPropertyStore(PropertiesService.getUserProperties())
-    .setScope('employees:read time_sheet:read')
-    .setParam('redirect_uri', getRedirectUri_());
+function generateHoursTracker02_05to02_18() {
+  var startDate = new Date(2026, 1, 5);
+  var endDate = new Date(2026, 1, 18, 23, 59, 59);
+  generateHoursTracker(startDate, endDate);
 }
 
 /**
- * Returns the OAuth2 redirect URI for this script's web app deployment.
+ * Menu entry: prompt user for a custom date range, then generate Hours Tracker.
  */
-function getRedirectUri_() {
-  return 'https://script.google.com/macros/d/' + ScriptApp.getScriptId() + '/usercallback';
-}
-
-/**
- * Opens a modal dialog with the Gusto OAuth authorization link.
- * User clicks the link to authorize in a new tab.
- */
-function authorizeGusto() {
-  var service = getGustoService_();
-
-  if (service.hasAccess()) {
-    SpreadsheetApp.getUi().alert('Already connected to Gusto!\n\nUse "Gusto Connection Status" to check details, or "Disconnect Gusto" to re-authorize.');
+function promptHoursTrackerDateRange() {
+  var ui = SpreadsheetApp.getUi();
+  var s = ui.prompt('Hours Tracker — Start date (MM/DD/YYYY):');
+  if (s.getSelectedButton() !== ui.Button.OK) return;
+  var e = ui.prompt('Hours Tracker — End date (MM/DD/YYYY):');
+  if (e.getSelectedButton() !== ui.Button.OK) return;
+  var sd = new Date(s.getResponseText());
+  var ed = new Date(e.getResponseText());
+  if (isNaN(sd.getTime()) || isNaN(ed.getTime())) {
+    ui.alert('Invalid date format. Please use MM/DD/YYYY.');
     return;
   }
-
-  var authUrl = service.getAuthorizationUrl();
-  var html = HtmlService.createHtmlOutput(
-    '<p>Click the link below to authorize Gusto access:</p>' +
-    '<p><a href="' + authUrl + '" target="_blank" style="font-size:16px;font-weight:bold;">Authorize Gusto</a></p>' +
-    '<p style="color:#666;font-size:12px;">After authorizing, you can close this dialog.</p>'
-  )
-    .setWidth(400)
-    .setHeight(150);
-
-  SpreadsheetApp.getUi().showModalDialog(html, 'Authorize Gusto');
+  ed.setHours(23, 59, 59);
+  generateHoursTracker(sd, ed);
 }
 
 /**
- * Handles the OAuth2 callback after the user authorizes in Gusto.
- * This function is called automatically by the OAuth2 library.
+ * Main Hours Tracker function.
+ * Loads check-in + Ops Hub data, splits into leaders vs scoot,
+ * and writes two tabs: "Hours Tracker" and "SCOOT Hours".
  */
-function gustoAuthCallback(request) {
-  var service = getGustoService_();
-  var authorized = service.handleCallback(request);
+function generateHoursTracker(startDate, endDate) {
+  var log = [];
+  log.push('=== HOURS TRACKER ===');
+  log.push('Period: ' + startDate.toDateString() + ' to ' + endDate.toDateString());
 
-  if (authorized) {
-    return HtmlService.createHtmlOutput(
-      '<h3 style="color:#34a853;">✓ Gusto Connected Successfully!</h3>' +
-      '<p>You can close this tab and return to your spreadsheet.</p>' +
-      '<p>Use <b>Sync Hours from Gusto</b> from the Hours Verification menu to pull hours.</p>'
-    );
-  } else {
-    return HtmlService.createHtmlOutput(
-      '<h3 style="color:#d93025;">✗ Authorization Failed</h3>' +
-      '<p>Please try again from the Hours Verification menu → Authorize Gusto.</p>'
-    );
-  }
-}
-
-/**
- * Clears stored OAuth tokens, disconnecting from Gusto.
- */
-function disconnectGusto() {
-  var service = getGustoService_();
-  service.reset();
-  SpreadsheetApp.getUi().alert('Gusto disconnected.\n\nOAuth tokens have been cleared. You will need to re-authorize to sync hours.');
-}
-
-/**
- * Displays the current Gusto connection status — credentials, auth state, and mode.
- */
-function checkGustoStatus() {
-  var props = PropertiesService.getScriptProperties();
-  var clientId = props.getProperty('GUSTO_CLIENT_ID');
-  var clientSecret = props.getProperty('GUSTO_CLIENT_SECRET');
-  var companyUuid = props.getProperty('GUSTO_COMPANY_UUID');
-
-  var lines = [];
-  lines.push('=== Gusto Connection Status ===\n');
-  lines.push('Mode: ' + (GUSTO_USE_SANDBOX ? 'SANDBOX (demo)' : 'PRODUCTION'));
-  lines.push('API Base: ' + (GUSTO_USE_SANDBOX ? GUSTO_SANDBOX_BASE : GUSTO_API_BASE));
-  lines.push('API Version: ' + GUSTO_API_VERSION);
-  lines.push('');
-  lines.push('Client ID: ' + (clientId ? clientId.substring(0, 8) + '...' : '❌ NOT SET'));
-  lines.push('Client Secret: ' + (clientSecret ? '••••••••' : '❌ NOT SET'));
-  lines.push('Company UUID: ' + (companyUuid ? companyUuid : '❌ NOT SET'));
-
-  if (clientId && clientSecret) {
-    try {
-      var service = getGustoService_();
-      lines.push('');
-      lines.push('Auth Status: ' + (service.hasAccess() ? '✅ Connected' : '❌ Not authorized — run "Authorize Gusto"'));
-    } catch (err) {
-      lines.push('');
-      lines.push('Auth Status: ❌ Error — ' + err.message);
+  // STEP 1: Load Ops Hub (reuse same logic as runReport)
+  var opsHub = {};
+  try {
+    var opsSS = SpreadsheetApp.openById(OPS_HUB_ID);
+    var opsSheets = opsSS.getSheets();
+    for (var s = 0; s < opsSheets.length; s++) {
+      var sheet = opsSheets[s];
+      var data = sheet.getDataRange().getValues();
+      if (data.length < 2) continue;
+      var headers = [];
+      for (var h = 0; h < data[0].length; h++) {
+        headers.push(String(data[0][h]).toLowerCase().trim());
+      }
+      var cSite = findCol(headers, ['site']);
+      var cLesson = findCol(headers, ['lesson', 'workshop']);
+      var cStart = findCol(headers, ['start time']);
+      var cEnd = findCol(headers, ['end time']);
+      var cSetup = findCol(headers, ['setup']);
+      if (cSite === -1 || cStart === -1 || cEnd === -1) continue;
+      for (var i = 1; i < data.length; i++) {
+        var row = data[i];
+        var site = String(row[cSite] || '').trim();
+        var lesson = cLesson !== -1 ? String(row[cLesson] || '').trim() : '';
+        var startT = row[cStart];
+        var endT = row[cEnd];
+        if (cSetup !== -1) {
+          var setup = String(row[cSetup] || '').toLowerCase();
+          if (setup.indexOf('cancelled') >= 0 || setup.indexOf('cancel') >= 0) continue;
+        }
+        if (!site || !startT || !endT) continue;
+        var dur = getDurationMin(startT, endT);
+        if (dur <= 0) continue;
+        var key = normalize(site + '|' + lesson);
+        opsHub[key] = { site: site, lesson: lesson, dur: dur, allowed: dur + BUFFER_MINUTES };
+      }
     }
-  } else {
-    lines.push('');
-    lines.push('⚠️ Set GUSTO_CLIENT_ID and GUSTO_CLIENT_SECRET in Script Properties first.');
+    log.push('Ops Hub workshops: ' + Object.keys(opsHub).length);
+  } catch (err) {
+    log.push('ERROR loading Ops Hub: ' + err.message);
   }
 
-  lines.push('');
-  lines.push('Redirect URI (for Gusto app config):');
-  lines.push(getRedirectUri_());
-
-  SpreadsheetApp.getUi().alert(lines.join('\n'));
-}
-
-/**
- * Authenticated GET request to the Gusto API.
- * Handles Bearer token injection, 401 (re-auth needed), and 429 (rate limit).
- * @param {string} endpoint - API path (e.g. '/v1/companies/{uuid}/employees')
- * @param {Object} params - Optional query parameters
- * @return {Object} Parsed JSON response
- */
-function gustoApiFetch_(endpoint, params) {
-  var service = getGustoService_();
-  if (!service.hasAccess()) {
-    throw new Error('Not authorized with Gusto. Run "Authorize Gusto" from the menu first.');
-  }
-
-  var baseUrl = GUSTO_USE_SANDBOX ? GUSTO_SANDBOX_BASE : GUSTO_API_BASE;
-  var url = baseUrl + endpoint;
-
-  // Append query params
-  if (params && Object.keys(params).length > 0) {
-    var qs = [];
-    for (var key in params) {
-      qs.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+  // STEP 2: Load check-ins (all tabs)
+  var allCheckIns = [];
+  try {
+    var ciSS = SpreadsheetApp.openById(CHECKINS_ID);
+    var ciSheets = ciSS.getSheets();
+    for (var s = 0; s < ciSheets.length; s++) {
+      var sheet = ciSheets[s];
+      var data = sheet.getDataRange().getValues();
+      if (data.length < 2) continue;
+      var hdrRow = -1;
+      var hdr = [];
+      for (var h = 0; h < Math.min(20, data.length); h++) {
+        var rowStr = data[h].map(function(c) { return String(c).toLowerCase().trim(); });
+        for (var cc = 0; cc < rowStr.length; cc++) {
+          if (rowStr[cc].indexOf('leader name') >= 0) { hdrRow = h; hdr = rowStr; break; }
+        }
+        if (hdrRow >= 0) break;
+      }
+      if (hdrRow === -1) continue;
+      var cRegion = findCol(hdr, ['region']);
+      var cWorkshop = findCol(hdr, ['workshop']);
+      var cSchool = findCol(hdr, ['school']);
+      var cLeader = findCol(hdr, ['leader name']);
+      var cDate = findCol(hdr, ['date']);
+      var cStatus = findCol(hdr, ['status']);
+      if (cLeader === -1 || cStatus === -1) continue;
+      for (var i = hdrRow + 1; i < data.length; i++) {
+        var row = data[i];
+        var leader = getVal(row, cLeader);
+        var status = getVal(row, cStatus).toLowerCase();
+        var workshop = getVal(row, cWorkshop);
+        var school = getVal(row, cSchool);
+        var region = getVal(row, cRegion);
+        if (!leader || !status) continue;
+        if (!workshop && !school) continue;
+        var dt = null;
+        if (cDate !== -1 && row[cDate]) dt = parseDate(row[cDate]);
+        if (dt) {
+          if (dt < startDate || dt > endDate) continue;
+        }
+        var worked = false;
+        for (var w = 0; w < WORKED_STATUSES.length; w++) {
+          if (status.indexOf(WORKED_STATUSES[w]) >= 0) { worked = true; break; }
+        }
+        allCheckIns.push({
+          leader: leader, status: status, worked: worked,
+          workshop: workshop, school: school, region: region,
+          date: dt, dateStr: dt ? formatDt(dt) : 'N/A'
+        });
+      }
     }
-    url += '?' + qs.join('&');
+    log.push('Check-in records: ' + allCheckIns.length);
+  } catch (err) {
+    log.push('ERROR loading check-ins: ' + err.message);
   }
 
-  var options = {
-    method: 'get',
-    headers: {
-      'Authorization': 'Bearer ' + service.getAccessToken(),
-      'X-Gusto-API-Version': GUSTO_API_VERSION,
-      'Accept': 'application/json'
-    },
-    muteHttpExceptions: true
-  };
+  // STEP 3: Split into scoot vs non-scoot, calculate hours
+  var leaderData = [];  // non-scoot sessions
+  var scootData = [];   // scoot sessions
 
-  var response = UrlFetchApp.fetch(url, options);
-  var code = response.getResponseCode();
+  for (var i = 0; i < allCheckIns.length; i++) {
+    var rec = allCheckIns[i];
+    if (!rec.worked) continue;
 
-  if (code === 401) {
-    service.reset();
-    throw new Error('Gusto authorization expired. Please run "Authorize Gusto" again.');
-  }
-
-  if (code === 429) {
-    // Rate limited — wait and retry once
-    Utilities.sleep(2000);
-    response = UrlFetchApp.fetch(url, options);
-    code = response.getResponseCode();
-    if (code === 429) {
-      throw new Error('Gusto API rate limit exceeded. Please wait a few minutes and try again.');
+    var isScoot = rec.status.indexOf('scoot') >= 0;
+    var ops = matchOpsHub(rec.school, rec.workshop, opsHub);
+    var dur, allowed, src;
+    if (ops) {
+      dur = ops.dur;
+      allowed = ops.allowed;
+      src = 'Ops Hub (' + ops.site + ')';
+    } else {
+      dur = 60;
+      allowed = 90;
+      src = 'DEFAULT 1hr';
     }
-  }
 
-  if (code !== 200) {
-    throw new Error('Gusto API error (' + code + '): ' + response.getContentText());
-  }
+    var entry = {
+      leader: rec.leader,
+      region: rec.region || 'Unknown',
+      date: rec.date,
+      dateStr: rec.dateStr,
+      workshop: rec.workshop,
+      school: rec.school,
+      status: rec.status,
+      dur: dur,
+      allowed: allowed,
+      src: src,
+      unmatched: !ops
+    };
 
-  return JSON.parse(response.getContentText());
-}
-
-/**
- * Fetches all pages from a paginated Gusto API endpoint.
- * Uses 100 items per page with a safety cap of 50 pages (5000 items).
- * @param {string} endpoint - API path
- * @param {Object} params - Optional base query parameters
- * @return {Array} All items across all pages
- */
-function gustoFetchAllPages_(endpoint, params) {
-  var allItems = [];
-  var page = 1;
-  var maxPages = 50;
-  params = params || {};
-  params.per = 100;
-
-  while (page <= maxPages) {
-    params.page = page;
-    var data = gustoApiFetch_(endpoint, params);
-
-    // Handle both array responses and object responses with a data key
-    var items = Array.isArray(data) ? data : (data.employees || data.time_sheets || data.data || []);
-
-    if (items.length === 0) break;
-
-    allItems = allItems.concat(items);
-
-    if (items.length < 100) break; // Last page
-    page++;
-  }
-
-  return allItems;
-}
-
-/**
- * Fetches all employees from the Gusto API and returns a UUID-to-name map.
- * @return {Object} Map of employee UUID → full name string
- */
-function fetchGustoEmployees_() {
-  var companyUuid = PropertiesService.getScriptProperties().getProperty('GUSTO_COMPANY_UUID');
-  if (!companyUuid) {
-    throw new Error('GUSTO_COMPANY_UUID not set in Script Properties.');
-  }
-
-  var employees = gustoFetchAllPages_('/v1/companies/' + companyUuid + '/employees');
-
-  var nameMap = {};
-  for (var i = 0; i < employees.length; i++) {
-    var emp = employees[i];
-    var uuid = emp.uuid || emp.id;
-    var firstName = emp.first_name || emp.firstName || '';
-    var lastName = emp.last_name || emp.lastName || '';
-    var fullName = (firstName + ' ' + lastName).trim();
-    if (uuid && fullName) {
-      nameMap[uuid] = fullName;
+    if (isScoot) {
+      scootData.push(entry);
+    } else {
+      leaderData.push(entry);
     }
   }
 
-  return nameMap;
+  log.push('Leader sessions: ' + leaderData.length);
+  log.push('SCOOT sessions: ' + scootData.length);
+
+  // STEP 4: Write both tabs
+  var hvSS = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
+  var dateRange = formatDt(startDate) + ' – ' + formatDt(endDate);
+
+  writeHoursTrackerTab_(hvSS, leaderData, HOURS_TRACKER_TAB, false, dateRange);
+  writeHoursTrackerTab_(hvSS, scootData, SCOOT_HOURS_TAB, true, dateRange);
+
+  log.push('\n=== COMPLETE ===');
+  Logger.log(log.join('\n'));
+
+  try {
+    var leadersByRegion = groupByRegion_(leaderData);
+    var regionCount = Object.keys(leadersByRegion).length;
+    SpreadsheetApp.getUi().alert('Hours Tracker Complete!',
+      'Leader sessions: ' + leaderData.length +
+      '\nSCOOT sessions: ' + scootData.length +
+      '\nRegions: ' + regionCount +
+      '\n\n→ Check "' + HOURS_TRACKER_TAB + '" tab for all leaders' +
+      '\n→ Check "' + SCOOT_HOURS_TAB + '" tab for SCOOT invoices',
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  } catch(e) {
+    Logger.log('Could not show alert: ' + e.message);
+  }
 }
 
 /**
- * Fetches time sheets from Gusto for a date range, resolves employee UUIDs to names,
- * and aggregates total hours per employee.
- * @param {Date} start - Start date
- * @param {Date} end - End date
- * @return {Array} Array of {name, hours} objects sorted by name
+ * Groups session entries by region and aggregates per-leader summaries.
+ * @param {Array} data - Array of session entry objects
+ * @return {Object} Map of region → { leaders: { name → { sessions, totalMin, unmatched, details[] } } }
  */
-function fetchGustoTimeSheets_(start, end) {
-  var companyUuid = PropertiesService.getScriptProperties().getProperty('GUSTO_COMPANY_UUID');
-  if (!companyUuid) {
-    throw new Error('GUSTO_COMPANY_UUID not set in Script Properties.');
-  }
+function groupByRegion_(data) {
+  var regions = {};
 
-  // Fetch employee name map
-  var nameMap = fetchGustoEmployees_();
+  for (var i = 0; i < data.length; i++) {
+    var entry = data[i];
+    var region = entry.region || 'Unknown';
 
-  // Format dates as YYYY-MM-DD for API
-  var startStr = Utilities.formatDate(start, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  var endStr = Utilities.formatDate(end, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-
-  // Fetch time sheets with date params
-  var timeSheets = gustoFetchAllPages_(
-    '/v1/companies/' + companyUuid + '/time_sheets',
-    { start_date: startStr, end_date: endStr }
-  );
-
-  // Aggregate hours per employee
-  var hoursByEmployee = {};
-
-  for (var i = 0; i < timeSheets.length; i++) {
-    var sheet = timeSheets[i];
-    var empUuid = sheet.employee_uuid || sheet.employee_id || '';
-    var empName = nameMap[empUuid] || empUuid;
-
-    // Parse hours from the time sheet entry
-    var totalHours = 0;
-
-    // Try different field names the API might use
-    if (typeof sheet.total_hours === 'number') {
-      totalHours = sheet.total_hours;
-    } else if (typeof sheet.regular_hours === 'number') {
-      totalHours = (sheet.regular_hours || 0) + (sheet.overtime_hours || 0) + (sheet.double_overtime_hours || 0);
-    } else if (sheet.hours_by_type) {
-      // Some API versions nest hours
-      var hbt = sheet.hours_by_type;
-      totalHours = (hbt.regular || 0) + (hbt.overtime || 0) + (hbt.double_overtime || 0);
-    } else if (typeof sheet.total_regular_hours_worked === 'number') {
-      totalHours = sheet.total_regular_hours_worked + (sheet.total_overtime_hours_worked || 0);
+    if (!regions[region]) {
+      regions[region] = { leaders: {} };
     }
 
-    // Client-side date filtering as fallback
-    if (sheet.date || sheet.check_date) {
-      var entryDate = new Date(sheet.date || sheet.check_date);
-      if (entryDate < start || entryDate > end) continue;
+    var leaders = regions[region].leaders;
+    if (!leaders[entry.leader]) {
+      leaders[entry.leader] = { name: entry.leader, sessions: 0, totalMin: 0, unmatched: 0, details: [] };
     }
 
-    if (!empName || totalHours === 0) continue;
-
-    if (!hoursByEmployee[empName]) {
-      hoursByEmployee[empName] = 0;
-    }
-    hoursByEmployee[empName] += totalHours;
+    var ldr = leaders[entry.leader];
+    ldr.sessions++;
+    ldr.totalMin += entry.allowed;
+    if (entry.unmatched) ldr.unmatched++;
+    ldr.details.push(entry);
   }
 
-  // Convert to sorted array
-  var result = [];
-  for (var name in hoursByEmployee) {
-    result.push({
-      name: name,
-      hours: Math.round(hoursByEmployee[name] * 100) / 100
-    });
-  }
-  result.sort(function(a, b) { return a.name.localeCompare(b.name); });
-
-  return result;
+  return regions;
 }
 
 /**
- * Writes API-fetched data to the "Gusto Import" tab in the same format as a CSV paste.
- * Column A = Employee Name, Column B = Total Hours, headers at row 4.
- * @param {Array} data - Array of {name, hours} objects
+ * Writes a formatted Hours Tracker tab with two sections:
+ *   Section A: Summary by region (one row per leader)
+ *   Section B: Detailed session log by region (one row per session)
+ *
+ * @param {Spreadsheet} hvSS - Hours Verification spreadsheet
+ * @param {Array} data - Session entries (already filtered to leaders-only or scoot-only)
+ * @param {string} tabName - Tab name to create/overwrite
+ * @param {boolean} isScoot - True if this is the SCOOT tab
+ * @param {string} dateRange - Formatted date range string for the title
  */
-function writeGustoImportData_(data) {
-  var ss = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
-  var tab = ss.getSheetByName(GUSTO_IMPORT_TAB);
+function writeHoursTrackerTab_(hvSS, data, tabName, isScoot, dateRange) {
+  var tab = hvSS.getSheetByName(tabName);
   if (!tab) {
-    tab = ss.insertSheet(GUSTO_IMPORT_TAB);
+    tab = hvSS.insertSheet(tabName);
   } else {
     tab.clear();
     tab.clearFormats();
   }
 
-  // Title row
-  tab.getRange(1, 1).setValue('GUSTO HOURS IMPORT (via API)');
-  tab.getRange(1, 1, 1, 6).merge();
-  tab.getRange(1, 1).setFontSize(14).setFontWeight('bold').setBackground('#1a73e8').setFontColor('#ffffff');
-
-  // Info row
-  tab.getRange(2, 1).setValue('Synced from Gusto API on ' + new Date().toLocaleString() + ' | ' + data.length + ' employees');
-  tab.getRange(2, 1, 1, 6).merge().setFontColor('#666666').setWrap(true);
-
-  // Headers at row 4 (same as setupGustoImportTab)
-  var headers = ['Employee Name', 'Total Hours', 'Regular Hours', 'Overtime Hours', 'Department', 'Notes'];
-  tab.getRange(4, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e8eaed');
-
-  // Write data starting at row 5
-  if (data.length > 0) {
-    var rows = [];
-    for (var i = 0; i < data.length; i++) {
-      rows.push([data[i].name, data[i].hours, '', '', '', '']);
-    }
-    tab.getRange(5, 1, rows.length, 6).setValues(rows);
+  if (data.length === 0) {
+    tab.getRange(1, 1).setValue('No ' + (isScoot ? 'SCOOT' : 'leader') + ' sessions found for ' + dateRange);
+    tab.getRange(1, 1).setFontSize(12).setFontWeight('bold');
+    return;
   }
 
+  var regions = groupByRegion_(data);
+  var regionNames = Object.keys(regions).sort();
+
+  // =============== SECTION A: SUMMARY ===============
+  var titleLabel = isScoot ? 'SCOOT HOURS' : 'HOURS TRACKER';
+  tab.getRange(1, 1).setValue(titleLabel + ' — ' + dateRange);
+  tab.getRange(1, 1, 1, 8).merge();
+  tab.getRange(1, 1).setFontSize(14).setFontWeight('bold')
+    .setBackground(isScoot ? '#ff6d01' : '#1a73e8').setFontColor('#ffffff');
+
+  tab.getRange(2, 1).setValue('Generated: ' + new Date().toLocaleString() + ' | Regions: ' + regionNames.length + ' | Sessions: ' + data.length);
+  tab.getRange(2, 1, 1, 8).merge().setFontColor('#666666');
+
+  // Summary headers
+  var sumHeaders = ['Region', 'Leader Name', 'Sessions', 'Total Hours', 'Formatted', 'Unmatched', 'Status'];
+  tab.getRange(4, 1, 1, sumHeaders.length).setValues([sumHeaders]).setFontWeight('bold').setBackground('#e8eaed');
+
+  var row = 5;
+  for (var r = 0; r < regionNames.length; r++) {
+    var regionName = regionNames[r];
+    var colorIdx = r % REGION_TINTS.length;
+    var tint = REGION_TINTS[colorIdx];
+    var leaderMap = regions[regionName].leaders;
+
+    // Sort leaders alphabetically within region
+    var leaderNames = Object.keys(leaderMap).sort();
+
+    for (var l = 0; l < leaderNames.length; l++) {
+      var ldr = leaderMap[leaderNames[l]];
+      var hrs = Math.round((ldr.totalMin / 60) * 100) / 100;
+      var hh = Math.floor(hrs);
+      var mm = Math.round((hrs - hh) * 60);
+      var fmt = hh + 'h ' + (mm < 10 ? '0' : '') + mm + 'm';
+
+      tab.getRange(row, 1, 1, 7).setValues([[
+        regionName,
+        ldr.name,
+        ldr.sessions,
+        hrs,
+        fmt,
+        ldr.unmatched,
+        ldr.unmatched > 0 ? '⚠️ Check' : '✅ OK'
+      ]]);
+      tab.getRange(row, 1, 1, 7).setBackground(tint);
+      row++;
+    }
+  }
+
+  // =============== SECTION B: DETAILED SESSION LOG ===============
+  var detailStart = row + 2;
+  tab.getRange(detailStart, 1).setValue('DETAILED SESSION LOG');
+  tab.getRange(detailStart, 1, 1, 8).merge();
+  tab.getRange(detailStart, 1).setFontSize(12).setFontWeight('bold').setBackground('#34a853').setFontColor('#ffffff');
+
+  var detHeaders = ['Leader Name', 'Date', 'Workshop', 'School', 'Status', 'Duration (min)', 'Allowed (min)', 'Source'];
+  tab.getRange(detailStart + 1, 1, 1, detHeaders.length).setValues([detHeaders]).setFontWeight('bold').setBackground('#e8eaed');
+
+  var dRow = detailStart + 2;
+  for (var r = 0; r < regionNames.length; r++) {
+    var regionName = regionNames[r];
+    var colorIdx = r % REGION_COLORS.length;
+    var regionColor = REGION_COLORS[colorIdx];
+    var tint = REGION_TINTS[colorIdx];
+    var leaderMap = regions[regionName].leaders;
+    var leaderNames = Object.keys(leaderMap).sort();
+
+    // Region header row
+    tab.getRange(dRow, 1).setValue(regionName);
+    tab.getRange(dRow, 1, 1, 8).merge();
+    tab.getRange(dRow, 1).setFontSize(11).setFontWeight('bold')
+      .setBackground(regionColor).setFontColor('#ffffff');
+    dRow++;
+
+    for (var l = 0; l < leaderNames.length; l++) {
+      var ldr = leaderMap[leaderNames[l]];
+
+      // Sort details by date
+      ldr.details.sort(function(a, b) {
+        if (!a.date && !b.date) return 0;
+        if (!a.date) return 1;
+        if (!b.date) return -1;
+        return a.date.getTime() - b.date.getTime();
+      });
+
+      // Write each session row
+      for (var d = 0; d < ldr.details.length; d++) {
+        var det = ldr.details[d];
+        tab.getRange(dRow, 1, 1, 8).setValues([[
+          det.leader, det.dateStr, det.workshop, det.school,
+          det.status, det.dur, det.allowed, det.src
+        ]]);
+        // Highlight unmatched workshops yellow
+        if (det.unmatched) {
+          tab.getRange(dRow, 1, 1, 8).setBackground('#fff3cd');
+        } else {
+          tab.getRange(dRow, 1, 1, 8).setBackground(tint);
+        }
+        dRow++;
+      }
+
+      // Leader subtotal row
+      var totalHrs = Math.round((ldr.totalMin / 60) * 100) / 100;
+      var hh = Math.floor(totalHrs);
+      var mm = Math.round((totalHrs - hh) * 60);
+      var fmtTotal = hh + 'h ' + (mm < 10 ? '0' : '') + mm + 'm';
+
+      tab.getRange(dRow, 1, 1, 8).setValues([[
+        '', '', '', ldr.name + ' TOTAL', ldr.sessions + ' sessions', '', ldr.totalMin, fmtTotal
+      ]]);
+      tab.getRange(dRow, 1, 1, 8).setFontWeight('bold').setBackground('#e8eaed');
+      dRow++;
+    }
+  }
+
+  // Auto-resize columns and freeze header rows
+  for (var c = 1; c <= 8; c++) tab.autoResizeColumn(c);
   tab.setFrozenRows(4);
-  for (var c = 1; c <= 6; c++) tab.autoResizeColumn(c);
-}
-
-/**
- * Main user-facing function — prompts for date range, fetches hours from Gusto API,
- * writes to the Gusto Import tab, and optionally auto-runs the comparison.
- */
-function syncGustoHours() {
-  var ui = SpreadsheetApp.getUi();
-
-  // Check authorization
-  var service;
-  try {
-    service = getGustoService_();
-  } catch (err) {
-    ui.alert('Gusto Not Configured\n\n' + err.message);
-    return;
-  }
-
-  if (!service.hasAccess()) {
-    ui.alert('Not authorized with Gusto.\n\nRun "Authorize Gusto" from the menu first.');
-    return;
-  }
-
-  // Prompt for start date
-  var startResp = ui.prompt('Sync Hours from Gusto', 'Start date (MM/DD/YYYY):', ui.ButtonSet.OK_CANCEL);
-  if (startResp.getSelectedButton() !== ui.Button.OK) return;
-
-  var endResp = ui.prompt('Sync Hours from Gusto', 'End date (MM/DD/YYYY):', ui.ButtonSet.OK_CANCEL);
-  if (endResp.getSelectedButton() !== ui.Button.OK) return;
-
-  var startDate = new Date(startResp.getResponseText());
-  var endDate = new Date(endResp.getResponseText());
-  endDate.setHours(23, 59, 59);
-
-  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-    ui.alert('Invalid date format. Please use MM/DD/YYYY.');
-    return;
-  }
-
-  // Fetch from Gusto
-  try {
-    ui.alert('Fetching hours from Gusto...\n\n' +
-      'Period: ' + formatDt(startDate) + ' to ' + formatDt(endDate) + '\n\n' +
-      'Click OK to start. This may take a moment.');
-
-    var data = fetchGustoTimeSheets_(startDate, endDate);
-
-    if (data.length === 0) {
-      ui.alert('No time sheet data found for ' + formatDt(startDate) + ' to ' + formatDt(endDate) + '.\n\n' +
-        'Check that:\n• The date range is correct\n• Employees have logged hours in Gusto\n• Your Gusto app has time_sheet:read scope');
-      return;
-    }
-
-    // Write to Gusto Import tab
-    writeGustoImportData_(data);
-
-    // Ask if they want to auto-run compare
-    var compare = ui.alert('Gusto Sync Complete!',
-      data.length + ' employees synced to "' + GUSTO_IMPORT_TAB + '" tab.\n\n' +
-      'Run "Compare Gusto Hours" now to check for discrepancies?',
-      ui.ButtonSet.YES_NO);
-
-    if (compare === ui.Button.YES) {
-      compareGustoHours();
-    }
-  } catch (err) {
-    ui.alert('Gusto Sync Error\n\n' + err.message);
-    Logger.log('Gusto sync error: ' + err.message + '\n' + err.stack);
-  }
 }
 
 // =====================================================

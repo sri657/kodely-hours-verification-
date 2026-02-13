@@ -7,11 +7,11 @@ Automatically calculates the **maximum allowed hours** for each leader based on:
 - **Ops Hub** → workshop start/end times (duration)
 - **Rule**: Allowed hours = Workshop Duration + 30 minutes
 
-### Four Phases:
+### Features:
 1. **Auto-Build Verification Sheet** — pulls Check-ins + Ops Hub and generates the report
 2. **Gusto CSV Import + Auto-Compare** — paste Gusto export, auto-match names, flag overages
 3. **Slack Alerts** — daily reports at 8 PM + weekly payroll summaries on Fridays
-4. **Gusto API Integration** — pull hours directly from Gusto with one click (no CSV export needed)
+4. **Hours Tracker** — auto-generated, color-coded tabs grouped by region (leaders + SCOOT separate)
 
 ## Setup (10 minutes)
 
@@ -60,10 +60,8 @@ After refreshing the sheet, you'll see the **Hours Verification** menu with:
 | Run Custom Date Range... | Generate report for any date range |
 | Setup Gusto Import Tab | Creates the "Gusto Import" tab with instructions |
 | Compare Gusto Hours | Reads Gusto data, matches names, writes Discrepancies report |
-| Authorize Gusto | Connect to Gusto via OAuth (one-time setup) |
-| Sync Hours from Gusto | Pull hours directly from Gusto API into "Gusto Import" tab |
-| Gusto Connection Status | Check if Gusto is connected and show config details |
-| Disconnect Gusto | Clear OAuth tokens (for re-auth or switching accounts) |
+| Generate Hours Tracker 02/05 - 02/18 | Generate region-grouped "Hours Tracker" + "SCOOT Hours" tabs |
+| Generate Hours Tracker (Custom Range)... | Same as above for any date range |
 | Send Daily Slack Alert | Manually trigger the daily Slack report |
 | Send Weekly Slack Summary | Manually trigger the weekly summary |
 | Setup Auto Triggers | Enable daily (8 PM) + weekly (Friday 6 PM) auto-alerts |
@@ -90,49 +88,36 @@ After refreshing the sheet, you'll see the **Hours Verification** menu with:
    - **Weekly on Friday at 6 PM** — full payroll verification digest
 3. Or send alerts manually from the menu
 
-### Phase 4: Gusto API Integration (Optional — replaces manual CSV export)
+### Hours Tracker (Region-Grouped Tabs)
 
-#### Prerequisites
-1. **Register as a Gusto developer** at [developer.gusto.com](https://developer.gusto.com)
-2. **Create a Gusto application** to get your `client_id` and `client_secret`
-3. **Add the OAuth2 library** in the Apps Script editor:
-   - Go to **Libraries** (+ icon in left sidebar)
-   - Enter Script ID: `1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF`
-   - Click **Look up** → select latest version → **Add**
-4. **Deploy as a web app** (needed for OAuth callback):
-   - In Apps Script, click **Deploy → New deployment**
-   - Select type: **Web app**
-   - Execute as: **Me**
-   - Who has access: **Anyone** (required for OAuth callback)
-   - Click **Deploy** and copy the deployment URL
-5. **Configure Gusto app redirect URI**:
-   - In your Gusto developer dashboard, set the redirect URI to:
-     `https://script.google.com/macros/d/{YOUR_SCRIPT_ID}/usercallback`
-   - You can find the exact URI by running **Gusto Connection Status** from the menu
-6. **Set Script Properties** (in Apps Script: **Project Settings → Script Properties**):
-   - `GUSTO_CLIENT_ID` — from your Gusto app
-   - `GUSTO_CLIENT_SECRET` — from your Gusto app
-   - `GUSTO_COMPANY_UUID` — your Gusto company UUID (found in Gusto admin URL or API)
+The Hours Tracker generates two color-coded, region-grouped tabs from the same check-in data:
 
-#### Sandbox vs Production
-The script defaults to **sandbox mode** (`GUSTO_USE_SANDBOX = true`) for safe testing. To switch to production:
-1. Open `HoursVerification.gs`
-2. Change `GUSTO_USE_SANDBOX` from `true` to `false`
-3. Run **Disconnect Gusto** (tokens are environment-specific)
-4. Run **Authorize Gusto** again with your production Gusto credentials
+- **"Hours Tracker"** tab — all leaders EXCEPT SCOOT, grouped by region
+- **"SCOOT Hours"** tab — SCOOT people only (for invoice matching)
 
-#### Authorization Flow
-1. Click **Hours Verification → Authorize Gusto**
-2. A dialog opens with an authorization link — click it
-3. Log in to Gusto and grant access
-4. You'll see a success page — close the tab and return to your spreadsheet
-5. Click **Gusto Connection Status** to verify it says "Connected"
+#### How It Works
+1. Click **Hours Verification → Generate Hours Tracker 02/05 - 02/18** (or custom range)
+2. The script loads check-ins and Ops Hub data (same sources as the main report)
+3. Sessions are split by status: SCOOT sessions go to the SCOOT tab, everything else goes to Hours Tracker
+4. A person with both leader AND scoot sessions appears in **both** tabs (only their relevant sessions)
 
-#### Syncing Hours
-1. Click **Hours Verification → Sync Hours from Gusto**
-2. Enter the start and end dates for the pay period
-3. The script fetches hours from Gusto and writes them to the "Gusto Import" tab
-4. You'll be prompted to auto-run "Compare Gusto Hours" — click Yes to generate the Discrepancies report
+#### Tab Layout
+
+Each tab has two sections:
+
+**Section A: Summary** (top)
+- One row per leader, grouped by region with color-coded tint backgrounds
+- Columns: Region, Leader Name, Sessions, Total Hours, Formatted, Unmatched, Status
+
+**Section B: Detailed Session Log** (below)
+- Color-coded region header rows (rotating 8-color palette)
+- One row per workshop session, sorted by date within each leader
+- Columns: Leader Name, Date, Workshop, School, Status, Duration, Allowed, Source
+- Bold subtotal rows for each leader with total hours
+- Unmatched workshops highlighted yellow
+
+#### No Setup Required
+The Hours Tracker uses the same spreadsheet IDs and data sources already configured for the main report. No additional setup needed.
 
 ## Troubleshooting
 
@@ -151,20 +136,8 @@ The script defaults to **sandbox mode** (`GUSTO_USE_SANDBOX = true`) for safe te
 **"Slack alerts not sending"**
 → Make sure the webhook URL is correctly set in the script (line 17). Test manually first via the menu before setting up triggers.
 
-**"Gusto credentials not configured"**
-→ Set `GUSTO_CLIENT_ID`, `GUSTO_CLIENT_SECRET`, and `GUSTO_COMPANY_UUID` in Script Properties (Project Settings → Script Properties).
-
-**"Not authorized with Gusto"**
-→ Run **Authorize Gusto** from the menu. If it was previously connected, tokens may have expired — disconnect and re-authorize.
-
-**"Gusto authorization expired"**
-→ OAuth tokens expire. Run **Disconnect Gusto** then **Authorize Gusto** to get fresh tokens.
-
-**"No time sheet data found"**
-→ Check that the date range matches hours logged in Gusto. If using sandbox mode, make sure you have test data in the Gusto demo environment.
-
-**"OAuth2 is not defined" error**
-→ The OAuth2 library is not added. In Apps Script, go to Libraries → Add → paste `1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF` → Add.
+**"Hours Tracker shows 'Unknown' region"**
+→ The check-in records are missing a region value. Make sure the Check-ins sheet has a "Region" column populated for each record.
 
 **"Authorization error"**
 → You need edit access to all 3 spreadsheets. Ask the sheet owners to grant you access.
