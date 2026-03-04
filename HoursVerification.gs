@@ -25,6 +25,14 @@ const DISCREPANCIES_TAB = 'Discrepancies';
 const HOURS_TRACKER_TAB = 'Hours Tracker';
 const SCOOT_HOURS_TAB = 'SCOOT Hours';
 
+// --- Daily Dashboard ---
+const DASHBOARD_PAY_PERIOD_START = new Date(2026, 1, 5);       // 02/05/2026
+const DASHBOARD_PAY_PERIOD_END = new Date(2026, 1, 18, 23, 59, 59); // 02/18/2026
+
+// SCOOT detection uses the "status" column in check-ins sheet.
+// Status = "scoot" → SCOOT tab. Anything else → leader tab.
+// To fix a misclassification, update the status in the check-ins sheet.
+
 // Region header colors (bold, saturated — for region header rows)
 const REGION_COLORS = [
   '#4285f4', // Blue
@@ -52,21 +60,18 @@ const REGION_TINTS = [
 function onOpen(e) {
   try {
     SpreadsheetApp.getUi().createMenu('Hours Verification')
-      .addItem('Run 02/05 - 02/18', 'run02_05to02_18')
-      .addItem('Run Custom Date Range...', 'promptDateRange')
-      .addSeparator()
-      .addItem('Setup Gusto Import Tab', 'setupGustoImportTab')
-      .addItem('Compare Gusto Hours', 'compareGustoHours')
-      .addSeparator()
       .addItem('Generate Hours Tracker 02/05 - 02/18', 'generateHoursTracker02_05to02_18')
       .addItem('Generate Hours Tracker (Custom Range)...', 'promptHoursTrackerDateRange')
-      .addItem('🔍 Debug SCOOT Detection', 'debugScootDetection')
       .addSeparator()
-      .addItem('Send Daily Slack Alert', 'sendDailySlackAlert')
-      .addItem('Send Weekly Slack Summary', 'sendWeeklySlackSummary')
+      .addItem('Setup SCOOT Invoice Tab (paste invoices here)', 'setupScootInvoiceImport')
+      .addItem('Verify SCOOT Invoices', 'verifyScootInvoices')
       .addSeparator()
-      .addItem('Setup Auto Triggers (Daily + Weekly)', 'setupTriggers')
-      .addItem('Remove All Triggers', 'removeTriggers')
+      .addItem('Enable Auto-Refresh (every hour)', 'enableAutoRefresh')
+      .addItem('Disable Auto-Refresh', 'disableAutoRefresh')
+      .addSeparator()
+      .addItem('Send Dashboard Email...', 'sendDashboardPrompt')
+      .addSeparator()
+      .addItem('Create "How It Works" Guide', 'createHowItWorksTab')
       .addToUi();
   } catch (err) {
     Logger.log('onOpen: no UI context — ' + err.message);
@@ -247,6 +252,9 @@ function runReport(startDate, endDate) {
   } catch (err) {
     log.push('ERROR loading check-ins: ' + err.message);
   }
+
+  // STEP 2b: Deduplicate leader names
+  allCheckIns = deduplicateLeaderNames_(allCheckIns);
 
   // STEP 3: Calculate hours per leader
   var leaders = {};
@@ -887,6 +895,627 @@ function generateHoursTracker02_05to02_18() {
   generateHoursTracker(startDate, endDate);
 }
 
+// ---- AUTO-REFRESH TRIGGER ----
+
+/**
+ * Enable hourly auto-refresh for the current pay period (02/05–02/18).
+ * Clears any existing auto-refresh triggers first to avoid duplicates.
+ */
+function enableAutoRefresh() {
+  disableAutoRefresh(); // remove existing triggers first
+  ScriptApp.newTrigger('autoRefreshHoursTracker')
+    .timeBased()
+    .everyHours(1)
+    .create();
+  SpreadsheetApp.getUi().alert(
+    'Auto-refresh enabled!\n\n' +
+    'The Hours Tracker will regenerate every hour with the latest check-in and absence data.\n\n' +
+    'To stop, use Menu → Hours Verification → Disable Auto-Refresh.'
+  );
+  Logger.log('Auto-refresh trigger created (every 1 hour).');
+}
+
+/**
+ * Disable auto-refresh by removing all autoRefreshHoursTracker triggers.
+ */
+function disableAutoRefresh() {
+  var triggers = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'autoRefreshHoursTracker') {
+      ScriptApp.deleteTrigger(triggers[i]);
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    Logger.log('Removed ' + removed + ' auto-refresh trigger(s).');
+    try {
+      SpreadsheetApp.getUi().alert('Auto-refresh disabled. The Hours Tracker will no longer update automatically.');
+    } catch (e) {
+      // No UI context (called from enableAutoRefresh cleanup) — that's fine
+    }
+  }
+}
+
+/**
+ * Called by the time-based trigger. Regenerates the Hours Tracker for 02/05–02/18.
+ * Runs without UI context so no alerts/prompts — just regenerates silently.
+ */
+function autoRefreshHoursTracker() {
+  var startDate = new Date(2026, 1, 5);
+  var endDate = new Date(2026, 1, 18, 23, 59, 59);
+  generateHoursTracker(startDate, endDate);
+  Logger.log('Auto-refresh completed at ' + new Date().toLocaleString());
+}
+
+// ---- HOW IT WORKS GUIDE TAB ----
+
+function createHowItWorksTab() {
+  var ss = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
+  var tabName = 'How It Works';
+  var tab = ss.getSheetByName(tabName);
+  if (tab) tab.clear(); else tab = ss.insertSheet(tabName);
+
+  var rows = [];
+  var styles = []; // [row, col, fontSize, bold, bg, fontColor]
+
+  // Helper to add a section header
+  function addHeader(text) {
+    rows.push([text, '', '', '']);
+    styles.push({ r: rows.length, size: 14, bold: true, bg: '#1a73e8', fg: '#ffffff' });
+    rows.push(['', '', '', '']);
+  }
+
+  // Helper to add a sub-header
+  function addSubHeader(text) {
+    rows.push([text, '', '', '']);
+    styles.push({ r: rows.length, size: 11, bold: true, bg: '#e8f0fe', fg: '#1a73e8' });
+  }
+
+  // Helper to add a row
+  function addRow(col1, col2, col3, col4) {
+    rows.push([col1 || '', col2 || '', col3 || '', col4 || '']);
+  }
+
+  // Helper to add an empty row
+  function addBlank() { rows.push(['', '', '', '']); }
+
+  // ======= TITLE =======
+  rows.push(['KODELY HOURS VERIFICATION — HOW IT WORKS', '', '', '']);
+  styles.push({ r: 1, size: 18, bold: true, bg: '#1a73e8', fg: '#ffffff' });
+  rows.push(['This guide explains how the Hours Verification system works, what each tab shows, and how to use it.', '', '', '']);
+  styles.push({ r: 2, size: 10, bold: false, bg: '#e8f0fe', fg: '#444444' });
+  addBlank();
+
+  // ======= OVERVIEW =======
+  addHeader('OVERVIEW');
+  addRow('This tool reads from two data sources and generates payroll-ready reports:');
+  addBlank();
+  addRow('  1.', 'Check-Ins Sheet', 'Leaders log when they arrive/leave workshops. Each row = one session.');
+  addRow('  2.', 'Ops Hub Sheet', 'The master schedule of workshops with expected durations and school info.');
+  addBlank();
+  addRow('The system cross-references check-ins against the Ops Hub to calculate allowed hours,');
+  addRow('flags absences, detects SCOOT contractors, deduplicates names, and produces clean output.');
+  addBlank();
+
+  // ======= DATA SOURCES =======
+  addHeader('DATA SOURCES');
+  addSubHeader('Check-Ins Sheet (live data)');
+  addRow('  What:', 'Real-time log of leader check-ins from the field');
+  addRow('  Key columns:', 'Leader Name, Date, Workshop, School, Status, Check-in Time, Check-out Time');
+  addRow('  Status values:', '"leader", "co-lead", "sub", "coordinator" → Leader tab  |  "scoot" → SCOOT tab');
+  addRow('  Absences:', 'If a leader is scheduled but has no check-in (or status = absent), they show as 0hr');
+  addBlank();
+  addSubHeader('Ops Hub Sheet (schedule)');
+  addRow('  What:', 'Master workshop schedule with expected durations');
+  addRow('  Used for:', 'Matching check-ins to workshops and calculating "allowed" hours');
+  addRow('  Matching:', 'School name + workshop name fuzzy-matched to find the right schedule entry');
+  addBlank();
+
+  // ======= TABS EXPLAINED =======
+  addHeader('TABS EXPLAINED');
+  addSubHeader('Hours Tracker [date range]');
+  addRow('  The main payroll verification tab. Contains 4 sections:');
+  addBlank();
+  addRow('  Section 1:', 'EXPECTED PAYROLL HOURS', 'One row per leader. Shows total sessions, absences, total hours.');
+  addRow('', '', 'Sorted alphabetically. Grand total at bottom.');
+  addRow('  Section 2:', 'SCOOT HOURS', 'Same format but only SCOOT contractors (status = "scoot").');
+  addRow('', '', 'Billed at flat 3hr per session.');
+  addRow('  Section 3:', 'DETAILED LEADER BREAKDOWN', 'One row per leader with ALL their workshops listed in a single cell.');
+  addRow('', '', 'Shows dates, schools, durations — everything in one view.');
+  addRow('  Section 4:', 'ALL UNIQUE WORKSHOPS', 'Every distinct workshop name that appeared in the date range.');
+  addBlank();
+
+  addSubHeader('SCOOT Hours [date range]');
+  addRow('  Dedicated SCOOT contractor tab showing each session with school, date, and flat 3hr billing.');
+  addRow('  Used to cross-reference against SCOOT invoices.');
+  addBlank();
+
+  addSubHeader('SCOOT Invoice Verify');
+  addRow('  Cross-references SCOOT invoices against check-in data.');
+  addRow('  Green = matched (invoice matches a check-in).  Red = unmatched (invoice with no matching check-in).');
+  addRow('  Also shows "Unbilled Sessions" — check-ins with no corresponding invoice.');
+  addBlank();
+
+  addSubHeader('SCOOT Invoice Paste');
+  addRow('  Paste raw SCOOT invoice data here. Columns: Instructor, School, Date, Hours, Amount.');
+  addRow('  Then run "Verify SCOOT Invoices" from the menu.');
+  addBlank();
+
+  addSubHeader('Auto Verification / Discrepancies');
+  addRow('  Legacy tabs from the original verification system. Auto Verification shows raw matched data.');
+  addRow('  Discrepancies shows mismatches between check-ins and Ops Hub schedule.');
+  addBlank();
+
+  // ======= HOW TO USE =======
+  addHeader('HOW TO USE');
+  addSubHeader('Step 1: Generate the Hours Tracker');
+  addRow('  Menu → Hours Verification → Generate Hours Tracker 02/05 - 02/18');
+  addRow('  Or use "Custom Range" to pick any date range.');
+  addRow('  This reads the latest check-ins and absences and builds fresh output tabs.');
+  addBlank();
+
+  addSubHeader('Step 2: Review Expected Payroll Hours');
+  addRow('  Open the "Hours Tracker" tab. Section 1 shows every leader and their total hours.');
+  addRow('  Compare these against what you see in Gusto or your payroll system.');
+  addRow('  Look for: unusually high hours, missing leaders, unexpected 0hr entries.');
+  addBlank();
+
+  addSubHeader('Step 3: Check SCOOT Billing');
+  addRow('  Open the "SCOOT Hours" tab to see all SCOOT sessions.');
+  addRow('  If you have invoices from SCOOT, paste them into the "SCOOT Invoice Paste" tab,');
+  addRow('  then run "Verify SCOOT Invoices" to catch any overbilling or missing sessions.');
+  addBlank();
+
+  addSubHeader('Step 4: Enable Auto-Refresh (optional)');
+  addRow('  Menu → Hours Verification → Enable Auto-Refresh (every hour)');
+  addRow('  The tracker will regenerate hourly with the latest data.');
+  addRow('  Disable when the pay period closes and you\'ve finalized hours.');
+  addBlank();
+
+  // ======= KEY FEATURES =======
+  addHeader('KEY FEATURES');
+  addRow('  Name Deduplication', 'Fuzzy matching merges names like "Kelly O." and "Kelly Orzuna" into one entry.');
+  addRow('  SCOOT Detection', 'Based on status column in check-ins. Status = "scoot" → SCOOT tab. Fix in check-ins if wrong.');
+  addRow('  Absence Tracking', 'Scheduled sessions with no check-in show as 0hr with red highlighting.');
+  addRow('  Formatted Hours', 'Durations shown as both minutes and hours+minutes (e.g., 90 → "1hr 30mins").');
+  addRow('  Auto-Refresh', 'Hourly trigger keeps the tracker current as new check-ins come in.');
+  addRow('  Batch Processing', 'Handles 300+ leaders efficiently without hitting Google Apps Script timeouts.');
+  addBlank();
+
+  // ======= TROUBLESHOOTING =======
+  addHeader('TROUBLESHOOTING');
+  addRow('Problem', 'Cause', 'Fix');
+  styles.push({ r: rows.length, size: 10, bold: true, bg: '#f1f3f4', fg: '#333333' });
+  addRow('Leader in wrong tab (SCOOT vs Leader)', 'Status column in check-ins is incorrect', 'Fix the status in the Check-Ins sheet, then re-run');
+  addRow('Same person appears twice', 'Name spelled differently in check-ins', 'Fix spelling in check-ins, or the fuzzy matcher will merge close matches');
+  addRow('Hours seem wrong', 'Check-in/check-out times are off', 'Verify the actual check-in times in the source sheet');
+  addRow('SCOOT invoice doesn\'t match', 'School name or date mismatch', 'Check that invoice school name closely matches check-in school name');
+  addRow('"Script timed out" error', 'Too much data for one run', 'Try a shorter date range, or wait and re-run');
+  addBlank();
+
+  // ======= QUICK REFERENCE =======
+  addHeader('QUICK REFERENCE — MENU OPTIONS');
+  addRow('Menu Item', 'What It Does');
+  styles.push({ r: rows.length, size: 10, bold: true, bg: '#f1f3f4', fg: '#333333' });
+  addRow('Generate Hours Tracker 02/05 - 02/18', 'Builds Hours Tracker + SCOOT tabs for the current pay period');
+  addRow('Generate Hours Tracker (Custom Range)', 'Same thing but you pick the dates');
+  addRow('Setup SCOOT Invoice Tab', 'Creates the paste tab for SCOOT invoice data');
+  addRow('Verify SCOOT Invoices', 'Cross-checks pasted invoices vs check-in data');
+  addRow('Enable Auto-Refresh (every hour)', 'Turns on hourly automatic regeneration');
+  addRow('Disable Auto-Refresh', 'Stops automatic regeneration');
+  addRow('Create "How It Works" Guide', 'Creates this tab you\'re reading now');
+  addBlank();
+  addBlank();
+  addRow('Last updated: ' + new Date().toLocaleString());
+
+  // ======= WRITE ALL DATA =======
+  tab.getRange(1, 1, rows.length, 4).setValues(rows);
+
+  // ======= APPLY STYLES =======
+  // Set default font
+  tab.getRange(1, 1, rows.length, 4).setFontFamily('Arial').setFontSize(10).setVerticalAlignment('top').setWrap(true);
+
+  // Apply individual row styles
+  for (var i = 0; i < styles.length; i++) {
+    var s = styles[i];
+    var range = tab.getRange(s.r, 1, 1, 4);
+    if (s.size) range.setFontSize(s.size);
+    if (s.bold) range.setFontWeight('bold');
+    if (s.bg) range.setBackground(s.bg);
+    if (s.fg) range.setFontColor(s.fg);
+  }
+
+  // Column widths
+  tab.setColumnWidth(1, 320);
+  tab.setColumnWidth(2, 280);
+  tab.setColumnWidth(3, 320);
+  tab.setColumnWidth(4, 200);
+
+  // Freeze title row
+  tab.setFrozenRows(1);
+
+  // Move tab to first position
+  ss.setActiveSheet(tab);
+  ss.moveActiveSheet(1);
+
+  SpreadsheetApp.getUi().alert('\"How It Works\" tab created! It\'s the first tab in the spreadsheet.');
+  Logger.log('How It Works tab created with ' + rows.length + ' rows.');
+}
+
+// ---- DAILY DASHBOARD EMAIL ----
+
+/**
+ * Prompt for recipient email, then send the dashboard.
+ * No auto-send — only fires when you manually click it.
+ */
+function sendDashboardPrompt() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt('Send Dashboard Email', 'Enter recipient email address:', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  var email = response.getResponseText().trim();
+  if (!email || email.indexOf('@') === -1) {
+    ui.alert('Invalid email address.');
+    return;
+  }
+  sendDailyDashboard_(email);
+  ui.alert('Dashboard sent to ' + email + '!');
+}
+
+/**
+ * Build and send the hours verification dashboard email to the given address.
+ */
+function sendDailyDashboard_(recipientEmail) {
+  var startDate = DASHBOARD_PAY_PERIOD_START;
+  var endDate = DASHBOARD_PAY_PERIOD_END;
+  var today = new Date();
+  var dayOfPeriod = Math.ceil((today - startDate) / 86400000);
+  var totalDays = Math.ceil((endDate - startDate) / 86400000);
+
+  // --- Load check-ins (same as generateHoursTracker Steps 1-3) ---
+  var opsHub = {};
+  try {
+    var opsSS = SpreadsheetApp.openById(OPS_HUB_ID);
+    var opsSheets = opsSS.getSheets();
+    for (var s = 0; s < opsSheets.length; s++) {
+      var sheet = opsSheets[s];
+      var data = sheet.getDataRange().getValues();
+      if (data.length < 2) continue;
+      var headers = [];
+      for (var h = 0; h < data[0].length; h++) headers.push(String(data[0][h]).toLowerCase().trim());
+      var cSite = findCol(headers, ['site']);
+      var cLesson = findCol(headers, ['lesson', 'workshop']);
+      var cStart = findCol(headers, ['start time']);
+      var cEnd = findCol(headers, ['end time']);
+      var cSetup = findCol(headers, ['setup']);
+      if (cSite === -1 || cStart === -1 || cEnd === -1) continue;
+      for (var i = 1; i < data.length; i++) {
+        var row = data[i];
+        var site = String(row[cSite] || '').trim();
+        var lesson = cLesson !== -1 ? String(row[cLesson] || '').trim() : '';
+        var startT = row[cStart], endT = row[cEnd];
+        if (cSetup !== -1) {
+          var setup = String(row[cSetup] || '').toLowerCase();
+          if (setup.indexOf('cancelled') >= 0 || setup.indexOf('cancel') >= 0) continue;
+        }
+        if (!site || !startT || !endT) continue;
+        var dur = getDurationMin(startT, endT);
+        if (dur <= 0) continue;
+        var key = normalize(site + '|' + lesson);
+        opsHub[key] = { site: site, lesson: lesson, dur: dur, allowed: dur + BUFFER_MINUTES };
+      }
+    }
+  } catch (err) { Logger.log('Dashboard: Ops Hub error: ' + err.message); }
+
+  var allCheckIns = [];
+  try {
+    var ciSS = SpreadsheetApp.openById(CHECKINS_ID);
+    var ciSheets = ciSS.getSheets();
+    for (var s = 0; s < ciSheets.length; s++) {
+      var sheet = ciSheets[s];
+      var data = sheet.getDataRange().getValues();
+      if (data.length < 2) continue;
+      var hdrRow = -1, hdr = [];
+      for (var h = 0; h < Math.min(20, data.length); h++) {
+        var rowStr = data[h].map(function(c) { return String(c).toLowerCase().trim(); });
+        for (var cc = 0; cc < rowStr.length; cc++) {
+          if (rowStr[cc].indexOf('leader name') >= 0) { hdrRow = h; hdr = rowStr; break; }
+        }
+        if (hdrRow >= 0) break;
+      }
+      if (hdrRow === -1) continue;
+      var cRegion = findCol(hdr, ['region']);
+      var cWorkshop = findCol(hdr, ['workshop']);
+      var cSchool = findCol(hdr, ['school']);
+      var cLeader = findCol(hdr, ['leader name']);
+      var cDate = findCol(hdr, ['date']);
+      var cStatus = findCol(hdr, ['status']);
+      if (cLeader === -1 || cStatus === -1) continue;
+      for (var i = hdrRow + 1; i < data.length; i++) {
+        var row = data[i];
+        var leader = getVal(row, cLeader);
+        var status = getVal(row, cStatus).toLowerCase();
+        var workshop = getVal(row, cWorkshop);
+        var school = getVal(row, cSchool);
+        var region = getVal(row, cRegion);
+        if (!leader || !status) continue;
+        if (!workshop && !school) continue;
+        var dt = null;
+        if (cDate !== -1 && row[cDate]) dt = parseDate(row[cDate]);
+        if (dt) { if (dt < startDate || dt > endDate) continue; }
+        var worked = false;
+        for (var w = 0; w < WORKED_STATUSES.length; w++) {
+          if (status.indexOf(WORKED_STATUSES[w]) >= 0) { worked = true; break; }
+        }
+        allCheckIns.push({
+          leader: leader, status: status, worked: worked,
+          workshop: workshop, school: school, region: region,
+          date: dt, dateStr: dt ? formatDt(dt) : 'N/A'
+        });
+      }
+    }
+  } catch (err) { Logger.log('Dashboard: Check-in error: ' + err.message); }
+
+  allCheckIns = deduplicateLeaderNames_(allCheckIns);
+
+  // Split into leader vs scoot, calculate hours
+  var leaderSessions = [], scootSessions = [], absences = [];
+  var leaderSet = {}, scootSet = {}, regionSet = {}, schoolSet = {};
+  var totalLeaderMin = 0, totalScootSessions = 0;
+  var unmatchedCount = 0;
+  var dailyCounts = {}; // dateStr → count
+
+  for (var i = 0; i < allCheckIns.length; i++) {
+    var rec = allCheckIns[i];
+    var statusTrimmed = rec.status.trim().toLowerCase();
+    var isScoot = (statusTrimmed === 'scoot');
+    var dur, allowed, ops;
+
+    if (rec.worked) {
+      ops = matchOpsHub(rec.school, rec.workshop, opsHub);
+      if (ops) { dur = ops.dur; allowed = ops.allowed; }
+      else { dur = 60; allowed = 90; unmatchedCount++; }
+    } else {
+      dur = 0; allowed = 0;
+      absences.push({ leader: rec.leader, date: rec.dateStr, school: rec.school, workshop: rec.workshop });
+    }
+
+    if (isScoot) {
+      scootSessions.push(rec);
+      scootSet[rec.leader] = true;
+      totalScootSessions++;
+    } else {
+      leaderSessions.push(rec);
+      leaderSet[rec.leader] = (leaderSet[rec.leader] || 0) + allowed;
+      totalLeaderMin += allowed;
+    }
+
+    if (rec.region) regionSet[rec.region] = (regionSet[rec.region] || 0) + 1;
+    if (rec.school) schoolSet[rec.school] = true;
+    if (rec.dateStr && rec.dateStr !== 'N/A') {
+      dailyCounts[rec.dateStr] = (dailyCounts[rec.dateStr] || 0) + 1;
+    }
+  }
+
+  // --- Compute metrics ---
+  var totalLeaders = Object.keys(leaderSet).length;
+  var totalScoot = Object.keys(scootSet).length;
+  var totalHrs = Math.round((totalLeaderMin / 60) * 100) / 100;
+  var avgHrsPerLeader = totalLeaders > 0 ? Math.round((totalHrs / totalLeaders) * 100) / 100 : 0;
+  var totalSchools = Object.keys(schoolSet).length;
+  var totalAbsences = absences.length;
+
+  // Top 5 leaders by hours
+  var leaderArr = [];
+  for (var name in leaderSet) leaderArr.push({ name: name, min: leaderSet[name] });
+  leaderArr.sort(function(a, b) { return b.min - a.min; });
+  var top5 = leaderArr.slice(0, 5);
+
+  // Bottom 5 (lowest hours, excluding 0)
+  var bottom5 = leaderArr.filter(function(l) { return l.min > 0; });
+  bottom5.sort(function(a, b) { return a.min - b.min; });
+  bottom5 = bottom5.slice(0, 5);
+
+  // Sessions by region
+  var regionArr = [];
+  for (var reg in regionSet) regionArr.push({ name: reg, count: regionSet[reg] });
+  regionArr.sort(function(a, b) { return b.count - a.count; });
+
+  // Sessions by day
+  var dailyArr = [];
+  for (var d in dailyCounts) dailyArr.push({ date: d, count: dailyCounts[d] });
+  dailyArr.sort(function(a, b) { return new Date(a.date) - new Date(b.date); });
+
+  // Recent absences (last 3 days)
+  var recentAbsences = absences.filter(function(a) {
+    var d = new Date(a.date);
+    return (today - d) < 3 * 86400000;
+  });
+
+  // --- Build HTML email ---
+  var sheetUrl = 'https://docs.google.com/spreadsheets/d/' + HOURS_VERIFICATION_ID;
+  var dateRange = formatDt(startDate) + ' – ' + formatDt(endDate);
+
+  var html = '';
+  html += '<div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;">';
+
+  // Header
+  html += '<div style="background:#1a73e8;color:#fff;padding:20px 24px;border-radius:8px 8px 0 0;">';
+  html += '<h1 style="margin:0;font-size:22px;">Kodely Hours Verification Dashboard</h1>';
+  html += '<p style="margin:4px 0 0;opacity:0.9;font-size:14px;">Pay Period: ' + dateRange + ' &nbsp;|&nbsp; Day ' + dayOfPeriod + ' of ' + totalDays + '</p>';
+  html += '</div>';
+
+  // Key Metrics bar
+  html += '<div style="display:flex;background:#f8f9fa;border:1px solid #e0e0e0;border-top:none;">';
+  html += metricBox_('Total Leaders', totalLeaders, '#1a73e8');
+  html += metricBox_('Total Hours', formatMinutes_(totalLeaderMin), '#34a853');
+  html += metricBox_('SCOOT Staff', totalScoot, '#ff6d01');
+  html += metricBox_('Absences', totalAbsences, totalAbsences > 0 ? '#ea4335' : '#34a853');
+  html += metricBox_('Schools', totalSchools, '#9334e6');
+  html += '</div>';
+
+  // Summary stats
+  html += '<div style="background:#fff;border:1px solid #e0e0e0;border-top:none;padding:16px 24px;">';
+  html += '<p style="margin:0 0 4px;font-size:13px;color:#666;">Avg hours/leader: <strong>' + formatMinutes_(avgHrsPerLeader * 60) + '</strong> &nbsp;|&nbsp; ';
+  html += 'Leader sessions: <strong>' + leaderSessions.length + '</strong> &nbsp;|&nbsp; ';
+  html += 'SCOOT sessions: <strong>' + totalScootSessions + '</strong> (3hr flat each = ' + formatMinutes_(totalScootSessions * 180) + ') &nbsp;|&nbsp; ';
+  html += 'Unmatched to Ops Hub: <strong>' + unmatchedCount + '</strong></p>';
+  html += '</div>';
+
+  // Top 5 Leaders
+  html += sectionHeader_('Top 5 Leaders by Hours');
+  html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  html += '<tr style="background:#e8f0fe;"><th style="' + thStyle_() + '">#</th><th style="' + thStyle_() + '">Leader</th><th style="' + thStyle_() + '">Hours</th><th style="' + thStyle_() + '">Sessions</th></tr>';
+  for (var i = 0; i < top5.length; i++) {
+    var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+    var sessionCount = 0;
+    for (var j = 0; j < leaderSessions.length; j++) { if (leaderSessions[j].leader === top5[i].name && leaderSessions[j].worked) sessionCount++; }
+    html += '<tr style="background:' + bg + ';">';
+    html += '<td style="' + tdStyle_() + '">' + (i + 1) + '</td>';
+    html += '<td style="' + tdStyle_() + '"><strong>' + top5[i].name + '</strong></td>';
+    html += '<td style="' + tdStyle_() + '">' + formatMinutes_(top5[i].min) + '</td>';
+    html += '<td style="' + tdStyle_() + '">' + sessionCount + '</td>';
+    html += '</tr>';
+  }
+  html += '</table>';
+
+  // Bottom 5 Leaders (review for underpayment)
+  if (bottom5.length > 0) {
+    html += sectionHeader_('Lowest Hours (verify no missing check-ins)');
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<tr style="background:#fce8e6;"><th style="' + thStyle_() + '">#</th><th style="' + thStyle_() + '">Leader</th><th style="' + thStyle_() + '">Hours</th></tr>';
+    for (var i = 0; i < bottom5.length; i++) {
+      var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+      html += '<tr style="background:' + bg + ';"><td style="' + tdStyle_() + '">' + (i + 1) + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + bottom5[i].name + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + formatMinutes_(bottom5[i].min) + '</td></tr>';
+    }
+    html += '</table>';
+  }
+
+  // Sessions by Day
+  if (dailyArr.length > 0) {
+    html += sectionHeader_('Sessions by Day');
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<tr style="background:#e8f0fe;"><th style="' + thStyle_() + '">Date</th><th style="' + thStyle_() + '">Sessions</th><th style="' + thStyle_() + '">Visual</th></tr>';
+    var maxDay = 1;
+    for (var i = 0; i < dailyArr.length; i++) { if (dailyArr[i].count > maxDay) maxDay = dailyArr[i].count; }
+    for (var i = 0; i < dailyArr.length; i++) {
+      var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+      var barWidth = Math.round((dailyArr[i].count / maxDay) * 200);
+      html += '<tr style="background:' + bg + ';">';
+      html += '<td style="' + tdStyle_() + '">' + dailyArr[i].date + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + dailyArr[i].count + '</td>';
+      html += '<td style="' + tdStyle_() + '"><div style="background:#4285f4;height:14px;width:' + barWidth + 'px;border-radius:3px;"></div></td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+  }
+
+  // Sessions by Region
+  if (regionArr.length > 0) {
+    html += sectionHeader_('Sessions by Region');
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<tr style="background:#e8f0fe;"><th style="' + thStyle_() + '">Region</th><th style="' + thStyle_() + '">Sessions</th></tr>';
+    for (var i = 0; i < regionArr.length; i++) {
+      var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+      html += '<tr style="background:' + bg + ';"><td style="' + tdStyle_() + '">' + regionArr[i].name + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + regionArr[i].count + '</td></tr>';
+    }
+    html += '</table>';
+  }
+
+  // Recent Absences
+  if (recentAbsences.length > 0) {
+    html += sectionHeader_('Recent Absences (last 3 days)');
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<tr style="background:#fce8e6;"><th style="' + thStyle_() + '">Leader</th><th style="' + thStyle_() + '">Date</th><th style="' + thStyle_() + '">School</th><th style="' + thStyle_() + '">Workshop</th></tr>';
+    for (var i = 0; i < recentAbsences.length; i++) {
+      var a = recentAbsences[i];
+      var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+      html += '<tr style="background:' + bg + ';">';
+      html += '<td style="' + tdStyle_() + '">' + a.leader + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + a.date + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + (a.school || '') + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + (a.workshop || '') + '</td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+  } else {
+    html += sectionHeader_('Recent Absences (last 3 days)');
+    html += '<p style="padding:8px 24px;font-size:13px;color:#34a853;">No absences in the last 3 days.</p>';
+  }
+
+  // SCOOT Summary
+  if (totalScootSessions > 0) {
+    html += sectionHeader_('SCOOT Contractor Summary');
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<tr style="background:#fff3e0;"><th style="' + thStyle_() + '">Contractor</th><th style="' + thStyle_() + '">Sessions</th><th style="' + thStyle_() + '">Expected Bill (3hr × sessions)</th></tr>';
+    var scootByName = {};
+    for (var i = 0; i < scootSessions.length; i++) {
+      var n = scootSessions[i].leader;
+      scootByName[n] = (scootByName[n] || 0) + 1;
+    }
+    var scootArr = [];
+    for (var n in scootByName) scootArr.push({ name: n, count: scootByName[n] });
+    scootArr.sort(function(a, b) { return b.count - a.count; });
+    for (var i = 0; i < scootArr.length; i++) {
+      var bg = i % 2 === 0 ? '#fff' : '#f8f9fa';
+      html += '<tr style="background:' + bg + ';">';
+      html += '<td style="' + tdStyle_() + '">' + scootArr[i].name + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + scootArr[i].count + '</td>';
+      html += '<td style="' + tdStyle_() + '">' + formatMinutes_(scootArr[i].count * 180) + '</td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+  }
+
+  // Alerts / Flags
+  var flags = [];
+  if (unmatchedCount > 0) flags.push('&#9888;&#65039; ' + unmatchedCount + ' session(s) could not be matched to Ops Hub — using default 1hr.');
+  if (totalAbsences > 5) flags.push('&#9888;&#65039; High absence count (' + totalAbsences + ') this pay period.');
+  for (var i = 0; i < top5.length; i++) {
+    if (top5[i].min > 2400) flags.push('&#9888;&#65039; ' + top5[i].name + ' has ' + formatMinutes_(top5[i].min) + ' — verify this is correct.');
+  }
+
+  if (flags.length > 0) {
+    html += sectionHeader_('Flags & Alerts');
+    html += '<div style="padding:12px 24px;background:#fff8e1;border:1px solid #e0e0e0;border-top:none;">';
+    for (var i = 0; i < flags.length; i++) {
+      html += '<p style="margin:4px 0;font-size:13px;color:#e65100;">' + flags[i] + '</p>';
+    }
+    html += '</div>';
+  }
+
+  // Footer
+  html += '<div style="padding:16px 24px;background:#f8f9fa;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;font-size:12px;color:#888;">';
+  html += '<p style="margin:0;">Generated ' + today.toLocaleString() + ' &nbsp;|&nbsp; <a href="' + sheetUrl + '" style="color:#1a73e8;">Open Hours Verification Sheet</a></p>';
+  html += '<p style="margin:4px 0 0;">This is an automated daily report. To stop, go to the sheet menu → Hours Verification → Disable Daily Dashboard Email.</p>';
+  html += '</div>';
+  html += '</div>';
+
+  // Send
+  MailApp.sendEmail({
+    to: recipientEmail,
+    subject: 'Kodely Hours Dashboard — ' + formatDt(today) + ' (Pay Period ' + dateRange + ')',
+    htmlBody: html
+  });
+
+  Logger.log('Dashboard sent to ' + recipientEmail + ' at ' + today.toLocaleString());
+}
+
+// --- Dashboard HTML helpers ---
+function metricBox_(label, value, color) {
+  return '<div style="flex:1;text-align:center;padding:14px 8px;border-right:1px solid #e0e0e0;">' +
+    '<div style="font-size:22px;font-weight:bold;color:' + color + ';">' + value + '</div>' +
+    '<div style="font-size:11px;color:#666;margin-top:2px;">' + label + '</div></div>';
+}
+function sectionHeader_(text) {
+  return '<div style="background:#1a73e8;color:#fff;padding:8px 24px;font-size:14px;font-weight:bold;border:1px solid #e0e0e0;border-top:none;">' + text + '</div>';
+}
+function thStyle_() { return 'padding:8px 12px;text-align:left;border-bottom:2px solid #ddd;'; }
+function tdStyle_() { return 'padding:6px 12px;border-bottom:1px solid #eee;'; }
+
 /**
  * Menu entry: prompt user for a custom date range, then generate Hours Tracker.
  */
@@ -1074,25 +1703,37 @@ function generateHoursTracker(startDate, endDate) {
     log.push('ERROR loading check-ins: ' + err.message);
   }
 
+  // STEP 2b: Deduplicate leader names (e.g., "Kelly O." → "Kelly Orzuna")
+  allCheckIns = deduplicateLeaderNames_(allCheckIns);
+
   // STEP 3: Split into scoot vs non-scoot, calculate hours
   var leaderData = [];  // non-scoot sessions
   var scootData = [];   // scoot sessions
 
   for (var i = 0; i < allCheckIns.length; i++) {
     var rec = allCheckIns[i];
-    if (!rec.worked) continue;
 
-    var isScoot = rec.status.indexOf('scoot') >= 0;
-    var ops = matchOpsHub(rec.school, rec.workshop, opsHub);
-    var dur, allowed, src;
-    if (ops) {
-      dur = ops.dur;
-      allowed = ops.allowed;
-      src = 'Ops Hub (' + ops.site + ')';
+    // Only exact "scoot" status → SCOOT tab. All other statuses → leader tab.
+    var statusTrimmed = rec.status.trim().toLowerCase();
+    var isScoot = (statusTrimmed === 'scoot');
+    var dur, allowed, src, ops;
+
+    if (rec.worked) {
+      ops = matchOpsHub(rec.school, rec.workshop, opsHub);
+      if (ops) {
+        dur = ops.dur;
+        allowed = ops.allowed;
+        src = 'Ops Hub (' + ops.site + ')';
+      } else {
+        dur = 60;
+        allowed = 90;
+        src = 'DEFAULT 1hr';
+      }
     } else {
-      dur = 60;
-      allowed = 90;
-      src = 'DEFAULT 1hr';
+      ops = null;
+      dur = 0;
+      allowed = 0;
+      src = 'ABSENT — 0hr';
     }
 
     var entry = {
@@ -1106,7 +1747,8 @@ function generateHoursTracker(startDate, endDate) {
       dur: dur,
       allowed: allowed,
       src: src,
-      unmatched: !ops
+      unmatched: rec.worked && !ops,
+      absent: !rec.worked
     };
 
     if (isScoot) {
@@ -1123,26 +1765,26 @@ function generateHoursTracker(startDate, endDate) {
     Logger.log('DEBUG — First scoot entry: ' + scootData[0].leader + ' / status=' + scootData[0].status);
   }
 
-  // STEP 4: Write both tabs
+  // STEP 4: Write tabs with date-specific names
   var hvSS = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
   var dateRange = formatDt(startDate) + ' – ' + formatDt(endDate);
+  var shortRange = (startDate.getMonth() + 1) + '/' + startDate.getDate() + '-' + (endDate.getMonth() + 1) + '/' + endDate.getDate();
+  var trackerTabName = 'Hours Tracker ' + shortRange;
+  var scootTabName = 'SCOOT Hours ' + shortRange;
 
-  writeHoursTrackerTab_(hvSS, leaderData, HOURS_TRACKER_TAB, false, dateRange);
-  SpreadsheetApp.flush();  // Force pending writes before starting second tab
-  writeHoursTrackerTab_(hvSS, scootData, SCOOT_HOURS_TAB, true, dateRange);
+  writeHoursTrackerTab_(hvSS, leaderData, scootData, dateRange, trackerTabName);
+  SpreadsheetApp.flush();
+  writeScootInvoiceTab2_(hvSS, scootData, dateRange, scootTabName);
 
   log.push('\n=== COMPLETE ===');
   Logger.log(log.join('\n'));
 
   try {
-    var leadersByRegion = groupByRegion_(leaderData);
-    var regionCount = Object.keys(leadersByRegion).length;
     SpreadsheetApp.getUi().alert('Hours Tracker Complete!',
       'Leader sessions: ' + leaderData.length +
       '\nSCOOT sessions: ' + scootData.length +
-      '\nRegions: ' + regionCount +
-      '\n\n→ Check "' + HOURS_TRACKER_TAB + '" tab for all leaders' +
-      '\n→ Check "' + SCOOT_HOURS_TAB + '" tab for SCOOT invoices',
+      '\n\n→ Check "' + trackerTabName + '" tab' +
+      '\n→ Check "' + scootTabName + '" tab',
       SpreadsheetApp.getUi().ButtonSet.OK);
   } catch(e) {
     Logger.log('Could not show alert: ' + e.message);
@@ -1151,185 +1793,320 @@ function generateHoursTracker(startDate, endDate) {
 
 /**
  * Groups session entries by region and aggregates per-leader summaries.
- * @param {Array} data - Array of session entry objects
- * @return {Object} Map of region → { leaders: { name → { sessions, totalMin, unmatched, details[] } } }
  */
 function groupByRegion_(data) {
   var regions = {};
-
   for (var i = 0; i < data.length; i++) {
     var entry = data[i];
     var region = entry.region || 'Unknown';
-
-    if (!regions[region]) {
-      regions[region] = { leaders: {} };
-    }
-
+    if (!regions[region]) regions[region] = { leaders: {} };
     var leaders = regions[region].leaders;
-    if (!leaders[entry.leader]) {
-      leaders[entry.leader] = { name: entry.leader, sessions: 0, totalMin: 0, unmatched: 0, details: [] };
-    }
-
+    if (!leaders[entry.leader]) leaders[entry.leader] = { name: entry.leader, sessions: 0, absences: 0, totalMin: 0, unmatched: 0, details: [] };
     var ldr = leaders[entry.leader];
-    ldr.sessions++;
-    ldr.totalMin += entry.allowed;
-    if (entry.unmatched) ldr.unmatched++;
+    if (entry.absent) { ldr.absences++; } else { ldr.sessions++; ldr.totalMin += entry.allowed; if (entry.unmatched) ldr.unmatched++; }
     ldr.details.push(entry);
   }
-
   return regions;
 }
 
 /**
- * Writes a formatted Hours Tracker tab with two sections:
- *   Section A: Summary by region (one row per leader)
- *   Section B: Detailed session log by region (one row per session)
- *
- * @param {Spreadsheet} hvSS - Hours Verification spreadsheet
- * @param {Array} data - Session entries (already filtered to leaders-only or scoot-only)
- * @param {string} tabName - Tab name to create/overwrite
- * @param {boolean} isScoot - True if this is the SCOOT tab
- * @param {string} dateRange - Formatted date range string for the title
+ * Groups session entries by LEADER (one entry per person).
+ * Picks best region per leader (most frequent non-Unknown).
+ * Returns flat array of leader objects sorted alphabetically.
  */
-function writeHoursTrackerTab_(hvSS, data, tabName, isScoot, dateRange) {
+function groupByLeader_(data) {
+  var leaders = {};
+
+  for (var i = 0; i < data.length; i++) {
+    var entry = data[i];
+    var name = entry.leader;
+
+    if (!leaders[name]) {
+      leaders[name] = { name: name, sessions: 0, absences: 0, totalMin: 0, unmatched: 0, details: [], regionCounts: {} };
+    }
+
+    var ldr = leaders[name];
+    if (entry.absent) {
+      ldr.absences++;
+    } else {
+      ldr.sessions++;
+      ldr.totalMin += entry.allowed;
+      if (entry.unmatched) ldr.unmatched++;
+    }
+    ldr.details.push(entry);
+
+    // Track region frequency to pick the best one
+    var reg = entry.region || 'Unknown';
+    ldr.regionCounts[reg] = (ldr.regionCounts[reg] || 0) + 1;
+  }
+
+  // Assign best region to each leader and build sorted array
+  var result = [];
+  for (var name in leaders) {
+    var ldr = leaders[name];
+    // Pick most frequent non-Unknown region
+    var bestRegion = 'Unknown';
+    var bestCount = 0;
+    for (var reg in ldr.regionCounts) {
+      if (reg !== 'Unknown' && ldr.regionCounts[reg] > bestCount) {
+        bestCount = ldr.regionCounts[reg];
+        bestRegion = reg;
+      }
+    }
+    // If all are Unknown, keep Unknown
+    if (bestRegion === 'Unknown' && ldr.regionCounts['Unknown']) bestRegion = 'Unknown';
+    ldr.region = bestRegion;
+    ldr.hrs = Math.round((ldr.totalMin / 60) * 100) / 100;
+    delete ldr.regionCounts;
+    result.push(ldr);
+  }
+
+  return result;
+}
+
+/**
+ * Writes the main Hours Tracker tab using BATCH writes for performance.
+ * Section 1: Expected Payroll Hours — leaders ranked most → least
+ * Section 2: SCOOT Hours — separate billing
+ * Section 3: Detailed Leader Breakdown — every session/absence
+ * Section 4: All Unique Workshops
+ */
+function writeHoursTrackerTab_(hvSS, leaderData, scootData, dateRange, tabName) {
   var tab = hvSS.getSheetByName(tabName);
   if (!tab) {
     tab = hvSS.insertSheet(tabName);
   } else {
     tab.clear();
     tab.clearFormats();
-    SpreadsheetApp.flush();  // Ensure clear completes before writing
+    SpreadsheetApp.flush();
   }
 
-  if (data.length === 0) {
-    tab.getRange(1, 1).setValue('No ' + (isScoot ? 'SCOOT' : 'leader') + ' sessions found for ' + dateRange);
+  if (leaderData.length === 0 && scootData.length === 0) {
+    tab.getRange(1, 1).setValue('No sessions found for ' + dateRange);
     tab.getRange(1, 1).setFontSize(12).setFontWeight('bold');
     return;
   }
 
-  // === SCOOT: simple invoice-verification layout ===
-  if (isScoot) {
-    writeScootInvoiceTab_(tab, data, dateRange);
-    return;
+  // Group by leader (one entry per person, best region picked automatically)
+  var allLeaders = groupByLeader_(leaderData);
+
+  // Grand totals
+  var grandTotalMin = 0, grandSessions = 0, grandAbsences = 0;
+  for (var i = 0; i < allLeaders.length; i++) {
+    grandTotalMin += allLeaders[i].totalMin;
+    grandSessions += allLeaders[i].sessions;
+    grandAbsences += allLeaders[i].absences;
   }
 
-  var regions = groupByRegion_(data);
-  var regionNames = Object.keys(regions).sort();
+  // Sort by hours descending
+  var ranked = allLeaders.slice().sort(function(a, b) { return b.totalMin - a.totalMin; });
 
-  // =============== SECTION A: SUMMARY ===============
-  var titleLabel = 'HOURS TRACKER';
-  tab.getRange(1, 1).setValue(titleLabel + ' — ' + dateRange);
-  tab.getRange(1, 1, 1, 8).merge();
-  tab.getRange(1, 1).setFontSize(14).setFontWeight('bold')
-    .setBackground(isScoot ? '#ff6d01' : '#1a73e8').setFontColor('#ffffff');
+  // =====================================================================
+  // SECTION 1: EXPECTED PAYROLL HOURS (batch write)
+  // =====================================================================
+  tab.getRange(1, 1).setValue('EXPECTED PAYROLL HOURS — ' + dateRange);
+  tab.getRange(1, 1, 1, 8).merge().setFontSize(14).setFontWeight('bold')
+    .setBackground('#1a73e8').setFontColor('#ffffff');
 
-  tab.getRange(2, 1).setValue('Generated: ' + new Date().toLocaleString() + ' | Regions: ' + regionNames.length + ' | Sessions: ' + data.length);
+  tab.getRange(2, 1).setValue('Generated: ' + new Date().toLocaleString() + ' | ' + allLeaders.length + ' leaders | ' + grandSessions + ' sessions | ' + grandAbsences + ' absences');
   tab.getRange(2, 1, 1, 8).merge().setFontColor('#666666');
 
-  // Summary headers
-  var sumHeaders = ['Region', 'Leader Name', 'Sessions', 'Total Hours', 'Formatted', 'Unmatched', 'Status'];
-  tab.getRange(4, 1, 1, sumHeaders.length).setValues([sumHeaders]).setFontWeight('bold').setBackground('#e8eaed');
+  var sumHeaders = ['#', 'Leader Name', 'Region', 'Sessions Worked', 'Absences', 'Expected Hours', 'Expected Time', 'Notes'];
+  tab.getRange(4, 1, 1, 8).setValues([sumHeaders]).setFontWeight('bold').setBackground('#e8eaed');
 
-  var row = 5;
-  for (var r = 0; r < regionNames.length; r++) {
-    var regionName = regionNames[r];
-    var colorIdx = r % REGION_TINTS.length;
-    var tint = REGION_TINTS[colorIdx];
-    var leaderMap = regions[regionName].leaders;
+  // Build batch data for Section 1
+  var s1Data = [];
+  for (var i = 0; i < ranked.length; i++) {
+    var ldr = ranked[i];
+    var notes = '';
+    if (ldr.absences > 0) notes = ldr.absences + ' absence(s)';
+    if (ldr.unmatched > 0) notes += (notes ? ', ' : '') + ldr.unmatched + ' unmatched';
+    s1Data.push([i + 1, ldr.name, ldr.region, ldr.sessions, ldr.absences, ldr.hrs, formatMinutes_(ldr.totalMin), notes]);
+  }
+  // Grand total row
+  var grandHrs = Math.round((grandTotalMin / 60) * 100) / 100;
+  s1Data.push(['', 'GRAND TOTAL', '', grandSessions, grandAbsences, grandHrs, formatMinutes_(grandTotalMin), allLeaders.length + ' leaders']);
 
-    // Sort leaders alphabetically within region
-    var leaderNames = Object.keys(leaderMap).sort();
-
-    for (var l = 0; l < leaderNames.length; l++) {
-      var ldr = leaderMap[leaderNames[l]];
-      var hrs = Math.round((ldr.totalMin / 60) * 100) / 100;
-      var hh = Math.floor(hrs);
-      var mm = Math.round((hrs - hh) * 60);
-      var fmt = hh + 'h ' + (mm < 10 ? '0' : '') + mm + 'm';
-
-      tab.getRange(row, 1, 1, 7).setValues([[
-        regionName,
-        ldr.name,
-        ldr.sessions,
-        hrs,
-        fmt,
-        ldr.unmatched,
-        ldr.unmatched > 0 ? '⚠️ Check' : '✅ OK'
-      ]]);
-      tab.getRange(row, 1, 1, 7).setBackground(tint);
-      row++;
+  // Batch write Section 1
+  if (s1Data.length > 0) {
+    tab.getRange(5, 1, s1Data.length, 8).setValues(s1Data);
+    // Format: alternating rows + grand total
+    for (var i = 0; i < ranked.length; i++) {
+      if (i % 2 === 1) tab.getRange(5 + i, 1, 1, 8).setBackground('#f8f9fa');
+      if (ranked[i].absences > 0) tab.getRange(5 + i, 5).setFontColor('#d93025').setFontWeight('bold');
     }
+    // Grand total row styling
+    var gtRow = 5 + ranked.length;
+    tab.getRange(gtRow, 1, 1, 8).setFontWeight('bold').setBackground('#1a73e8').setFontColor('#ffffff');
   }
 
-  // =============== SECTION B: DETAILED SESSION LOG ===============
+  var row = 5 + s1Data.length;
+
+  // =====================================================================
+  // SECTION 2: SCOOT HOURS (batch write)
+  // =====================================================================
+  var scootStart = row + 2;
+  tab.getRange(scootStart, 1).setValue('SCOOT HOURS — Billed Separately (3hr flat per session)');
+  tab.getRange(scootStart, 1, 1, 8).merge().setFontSize(12).setFontWeight('bold')
+    .setBackground('#ff6d01').setFontColor('#ffffff');
+
+  if (scootData.length === 0) {
+    tab.getRange(scootStart + 1, 1).setValue('No SCOOT sessions found in this period.');
+    tab.getRange(scootStart + 1, 1, 1, 8).merge().setFontColor('#666666');
+    row = scootStart + 2;
+  } else {
+    var scootHeaders = ['#', 'Person', 'School', 'Date', 'Workshop', 'Status', 'Billed Hours', ''];
+    tab.getRange(scootStart + 1, 1, 1, 8).setValues([scootHeaders]).setFontWeight('bold').setBackground('#e8eaed');
+
+    scootData.sort(function(a, b) {
+      if (a.leader.toLowerCase() < b.leader.toLowerCase()) return -1;
+      if (a.leader.toLowerCase() > b.leader.toLowerCase()) return 1;
+      if (a.date && b.date) return a.date.getTime() - b.date.getTime();
+      return 0;
+    });
+
+    // Build batch
+    var s2Data = [];
+    for (var i = 0; i < scootData.length; i++) {
+      var d = scootData[i];
+      s2Data.push([i + 1, d.leader, d.school, d.dateStr, d.workshop, d.status, 3, '']);
+    }
+    // Total + per-person subtotals
+    s2Data.push(['', 'SCOOT TOTAL', '', '', '', '', scootData.length * 3, scootData.length + ' sessions']);
+    var scootCounts = {};
+    for (var i = 0; i < scootData.length; i++) {
+      scootCounts[scootData[i].leader] = (scootCounts[scootData[i].leader] || 0) + 1;
+    }
+    var scootNames = Object.keys(scootCounts).sort();
+    for (var n = 0; n < scootNames.length; n++) {
+      s2Data.push(['', scootNames[n], '', '', '', '', scootCounts[scootNames[n]] * 3, scootCounts[scootNames[n]] + ' sessions']);
+    }
+
+    var s2Start = scootStart + 2;
+    tab.getRange(s2Start, 1, s2Data.length, 8).setValues(s2Data);
+    // Format SCOOT total + subtotals
+    var scootTotalRow = s2Start + scootData.length;
+    tab.getRange(scootTotalRow, 1, 1, 8).setFontWeight('bold').setBackground('#ff6d01').setFontColor('#ffffff');
+    for (var n = 0; n < scootNames.length; n++) {
+      tab.getRange(scootTotalRow + 1 + n, 1, 1, 8).setBackground('#fef7cd');
+    }
+    row = s2Start + s2Data.length;
+  }
+
+  // =====================================================================
+  // SECTION 3: DETAILED LEADER BREAKDOWN — one row per leader (batch)
+  // =====================================================================
   var detailStart = row + 2;
-  tab.getRange(detailStart, 1).setValue('DETAILED SESSION LOG');
-  tab.getRange(detailStart, 1, 1, 8).merge();
-  tab.getRange(detailStart, 1).setFontSize(12).setFontWeight('bold').setBackground('#34a853').setFontColor('#ffffff');
+  tab.getRange(detailStart, 1).setValue('DETAILED LEADER BREAKDOWN (' + dateRange + ')');
+  tab.getRange(detailStart, 1, 1, 7).merge().setFontSize(12).setFontWeight('bold')
+    .setBackground('#34a853').setFontColor('#ffffff');
 
-  var detHeaders = ['Leader Name', 'Date', 'Workshop', 'School', 'Status', 'Duration (min)', 'Allowed (min)', 'Source'];
-  tab.getRange(detailStart + 1, 1, 1, detHeaders.length).setValues([detHeaders]).setFontWeight('bold').setBackground('#e8eaed');
+  var detHeaders = ['#', 'Leader Name', 'Region', 'Sessions', 'Absences', 'Expected Time', 'All Workshops & Dates'];
+  tab.getRange(detailStart + 1, 1, 1, 7).setValues([detHeaders]).setFontWeight('bold').setBackground('#e8eaed');
 
-  var dRow = detailStart + 2;
-  for (var r = 0; r < regionNames.length; r++) {
-    var regionName = regionNames[r];
-    var colorIdx = r % REGION_COLORS.length;
-    var regionColor = REGION_COLORS[colorIdx];
-    var tint = REGION_TINTS[colorIdx];
-    var leaderMap = regions[regionName].leaders;
-    var leaderNames = Object.keys(leaderMap).sort();
+  // Build one row per leader with all sessions in a text cell
+  var s3Data = [];
+  for (var i = 0; i < ranked.length; i++) {
+    var ldr = ranked[i];
 
-    // Region header row
-    tab.getRange(dRow, 1).setValue(regionName);
-    tab.getRange(dRow, 1, 1, 8).merge();
-    tab.getRange(dRow, 1).setFontSize(11).setFontWeight('bold')
-      .setBackground(regionColor).setFontColor('#ffffff');
-    dRow++;
+    // Sort details by date
+    ldr.details.sort(function(a, b) {
+      if (!a.date && !b.date) return 0;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return a.date.getTime() - b.date.getTime();
+    });
 
-    for (var l = 0; l < leaderNames.length; l++) {
-      var ldr = leaderMap[leaderNames[l]];
-
-      // Sort details by date
-      ldr.details.sort(function(a, b) {
-        if (!a.date && !b.date) return 0;
-        if (!a.date) return 1;
-        if (!b.date) return -1;
-        return a.date.getTime() - b.date.getTime();
-      });
-
-      // Write each session row
-      for (var d = 0; d < ldr.details.length; d++) {
-        var det = ldr.details[d];
-        tab.getRange(dRow, 1, 1, 8).setValues([[
-          det.leader, det.dateStr, det.workshop, det.school,
-          det.status, det.dur, det.allowed, det.src
-        ]]);
-        // Highlight unmatched workshops yellow
-        if (det.unmatched) {
-          tab.getRange(dRow, 1, 1, 8).setBackground('#fff3cd');
-        } else {
-          tab.getRange(dRow, 1, 1, 8).setBackground(tint);
-        }
-        dRow++;
+    // Build workshop detail text
+    var detailParts = [];
+    for (var d = 0; d < ldr.details.length; d++) {
+      var det = ldr.details[d];
+      if (det.absent) {
+        detailParts.push(det.dateStr + ': ABSENT — ' + det.workshop + ' @ ' + det.school + ' (' + det.status + ')');
+      } else {
+        detailParts.push(det.dateStr + ': ' + det.workshop + ' @ ' + det.school + ' (' + det.status + ', ' + formatMinutes_(det.allowed) + ')');
       }
+    }
 
-      // Leader subtotal row
-      var totalHrs = Math.round((ldr.totalMin / 60) * 100) / 100;
-      var hh = Math.floor(totalHrs);
-      var mm = Math.round((totalHrs - hh) * 60);
-      var fmtTotal = hh + 'h ' + (mm < 10 ? '0' : '') + mm + 'm';
+    s3Data.push([
+      i + 1,
+      ldr.name,
+      ldr.region,
+      ldr.sessions,
+      ldr.absences,
+      formatMinutes_(ldr.totalMin),
+      detailParts.join('\n')
+    ]);
+  }
 
-      tab.getRange(dRow, 1, 1, 8).setValues([[
-        '', '', '', ldr.name + ' TOTAL', ldr.sessions + ' sessions', '', ldr.totalMin, fmtTotal
-      ]]);
-      tab.getRange(dRow, 1, 1, 8).setFontWeight('bold').setBackground('#e8eaed');
-      dRow++;
+  // Batch write
+  var dStart = detailStart + 2;
+  if (s3Data.length > 0) {
+    tab.getRange(dStart, 1, s3Data.length, 7).setValues(s3Data);
+    tab.getRange(dStart, 7, s3Data.length, 1).setWrap(true); // wrap the details column
+    // Highlight absences
+    for (var i = 0; i < ranked.length; i++) {
+      if (ranked[i].absences > 0) {
+        tab.getRange(dStart + i, 5).setFontColor('#d93025').setFontWeight('bold');
+      }
+      if (i % 2 === 1) tab.getRange(dStart + i, 1, 1, 7).setBackground('#f8f9fa');
     }
   }
 
-  // Auto-resize columns and freeze header rows
-  for (var c = 1; c <= 8; c++) tab.autoResizeColumn(c);
+  var dRow = dStart + s3Data.length;
+
+  // =====================================================================
+  // SECTION 4: ALL UNIQUE WORKSHOPS (batch write)
+  // =====================================================================
+  var wsStart = dRow + 2;
+  tab.getRange(wsStart, 1).setValue('ALL UNIQUE WORKSHOPS');
+  tab.getRange(wsStart, 1, 1, 4).merge().setFontSize(12).setFontWeight('bold').setBackground('#fbbc04');
+
+  tab.getRange(wsStart + 1, 1, 1, 4).setValues([['#', 'Workshop', 'School(s)', 'Sessions']]).setFontWeight('bold').setBackground('#e8eaed');
+
+  var allData = leaderData.concat(scootData);
+  var wsMap = {};
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i].absent) continue;
+    var ws = allData[i].workshop || '(none)';
+    if (!wsMap[ws]) wsMap[ws] = { schools: {}, count: 0 };
+    wsMap[ws].count++;
+    var sch = allData[i].school || '';
+    if (sch) wsMap[ws].schools[sch] = true;
+  }
+  var wsNames = Object.keys(wsMap).sort();
+  if (wsNames.length > 0) {
+    var wsData = [];
+    for (var w = 0; w < wsNames.length; w++) {
+      var ws = wsMap[wsNames[w]];
+      wsData.push([w + 1, wsNames[w], Object.keys(ws.schools).sort().join(', '), ws.count]);
+    }
+    tab.getRange(wsStart + 2, 1, wsData.length, 4).setValues(wsData);
+  }
+
+  // Auto-resize and freeze
+  for (var c = 1; c <= 10; c++) tab.autoResizeColumn(c);
   tab.setFrozenRows(4);
+}
+
+/**
+ * Creates/clears the SCOOT Hours tab and writes the invoice layout.
+ */
+function writeScootInvoiceTab2_(hvSS, data, dateRange, tabName) {
+  var tab = hvSS.getSheetByName(tabName);
+  if (!tab) {
+    tab = hvSS.insertSheet(tabName);
+  } else {
+    tab.clear();
+    tab.clearFormats();
+    SpreadsheetApp.flush();
+  }
+  if (data.length === 0) {
+    tab.getRange(1, 1).setValue('No SCOOT sessions found for ' + dateRange);
+    tab.getRange(1, 1).setFontSize(12).setFontWeight('bold');
+    return;
+  }
+  writeScootInvoiceTab_(tab, data, dateRange);
 }
 
 /**
@@ -1359,19 +2136,49 @@ function writeScootInvoiceTab_(tab, data, dateRange) {
     return 0;
   });
 
-  // Write rows
+  // Write rows with daily subtotals
   var row = 5;
   var currentPerson = '';
+  var currentDate = '';
   var personColor = 0;
+  var daySessionCount = 0;
+  var dayStartRow = row;
+
   for (var i = 0; i < data.length; i++) {
     var d = data[i];
-    // Alternate tint per person for readability
+
+    // Person changed — flush daily subtotal for previous person's last date
     if (d.leader !== currentPerson) {
+      if (daySessionCount >= 2) {
+        tab.getRange(row, 1, 1, 4).setValues([['', '', currentDate + ' Total', daySessionCount + ' sessions — ' + formatMinutes_(daySessionCount * 180)]]);
+        tab.getRange(row, 1, 1, 4).setFontWeight('bold').setBackground('#f0f0f0');
+        row++;
+      }
       currentPerson = d.leader;
+      currentDate = d.dateStr;
+      daySessionCount = 0;
       personColor = (personColor + 1) % REGION_TINTS.length;
+    } else if (d.dateStr !== currentDate) {
+      // Same person, date changed — flush subtotal for previous date
+      if (daySessionCount >= 2) {
+        tab.getRange(row, 1, 1, 4).setValues([['', '', currentDate + ' Total', daySessionCount + ' sessions — ' + formatMinutes_(daySessionCount * 180)]]);
+        tab.getRange(row, 1, 1, 4).setFontWeight('bold').setBackground('#f0f0f0');
+        row++;
+      }
+      currentDate = d.dateStr;
+      daySessionCount = 0;
     }
+
+    daySessionCount++;
     tab.getRange(row, 1, 1, 4).setValues([[d.leader, d.school, d.dateStr, d.workshop]]);
     tab.getRange(row, 1, 1, 4).setBackground(REGION_TINTS[personColor]);
+    row++;
+  }
+
+  // Flush final daily subtotal
+  if (daySessionCount >= 2) {
+    tab.getRange(row, 1, 1, 4).setValues([['', '', currentDate + ' Total', daySessionCount + ' sessions — ' + formatMinutes_(daySessionCount * 180)]]);
+    tab.getRange(row, 1, 1, 4).setFontWeight('bold').setBackground('#f0f0f0');
     row++;
   }
 
@@ -1798,4 +2605,349 @@ function parseDate(val) {
 function formatDt(d) {
   var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
+}
+
+/**
+ * Formats minutes as "1hr 30mins" style for timesheet readability.
+ * Examples: 90 → "1hr 30mins", 60 → "1hr", 45 → "45mins", 0 → "0mins"
+ */
+function formatMinutes_(min) {
+  var h = Math.floor(min / 60);
+  var m = Math.round(min % 60);
+  if (h === 0) return m + 'mins';
+  if (m === 0) return h + 'hr';
+  return h + 'hr ' + m + 'mins';
+}
+
+/**
+ * Deduplicates leader names in check-in records using fuzzy matching.
+ * When two names match (e.g., "Kelly O." and "Kelly Orzuna"),
+ * keeps the longer/more complete name as canonical.
+ */
+function deduplicateLeaderNames_(checkIns) {
+  // Collect unique names
+  var nameSet = {};
+  for (var i = 0; i < checkIns.length; i++) {
+    nameSet[checkIns[i].leader] = true;
+  }
+  var uniqueNames = Object.keys(nameSet);
+
+  // Sort by length descending so longer names become canonical first
+  uniqueNames.sort(function(a, b) { return b.length - a.length; });
+
+  // Build canonical map by checking each name against existing canonicals
+  var canonicalMap = {};   // shortName → canonicalName
+  var canonicalLookup = {}; // normalizedName → {name: canonicalName}
+
+  for (var i = 0; i < uniqueNames.length; i++) {
+    var name = uniqueNames[i];
+    var normName = name.toLowerCase().replace(/[^a-z]/g, '');
+
+    // Check if this name matches any existing canonical name
+    var match = fuzzyMatchName(name, canonicalLookup);
+
+    if (match) {
+      // Map this (shorter) name to the existing canonical
+      canonicalMap[name] = match.name;
+      Logger.log('Merged name: "' + name + '" → "' + match.name + '"');
+    } else {
+      // No match — this becomes a new canonical name
+      canonicalLookup[normName] = { name: name };
+    }
+  }
+
+  // Apply mappings to all check-in records
+  var mergeCount = Object.keys(canonicalMap).length;
+  if (mergeCount > 0) {
+    Logger.log('Name dedup: ' + mergeCount + ' name(s) merged');
+    for (var i = 0; i < checkIns.length; i++) {
+      if (canonicalMap[checkIns[i].leader]) {
+        checkIns[i].leader = canonicalMap[checkIns[i].leader];
+      }
+    }
+  }
+
+  return checkIns;
+}
+
+// =====================================================
+// SCOOT INVOICE VERIFICATION
+// =====================================================
+
+var SCOOT_INVOICE_TAB = 'SCOOT Invoices';
+
+/**
+ * Creates the SCOOT Invoices tab with headers and instructions.
+ */
+function setupScootInvoiceImport() {
+  var ss = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
+  var tab = ss.getSheetByName(SCOOT_INVOICE_TAB);
+  if (!tab) {
+    tab = ss.insertSheet(SCOOT_INVOICE_TAB);
+  } else {
+    tab.clear();
+    tab.clearFormats();
+  }
+
+  tab.getRange(1, 1).setValue('SCOOT INVOICE DATA — Paste below');
+  tab.getRange(1, 1, 1, 6).merge().setFontSize(14).setFontWeight('bold')
+    .setBackground('#ff6d01').setFontColor('#ffffff');
+
+  tab.getRange(2, 1).setValue('Paste your SCOOT invoice data starting at row 4. Match the columns below.');
+  tab.getRange(2, 1, 1, 6).merge().setFontColor('#666666');
+
+  var headers = ['Paid Status', 'Invoice Number', 'Invoice Date', 'Issued To (School)', 'Amount', 'Paid Date'];
+  tab.getRange(4, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e8eaed');
+
+  // Sample row
+  tab.getRange(5, 1, 1, 6).setValues([['Not Paid', '154545', '2/16/2026', 'Maryland Elementary School', '$522.00', '']]);
+  tab.getRange(5, 1, 1, 6).setFontColor('#999999').setFontStyle('italic');
+
+  tab.setFrozenRows(4);
+  for (var c = 1; c <= 6; c++) tab.autoResizeColumn(c);
+
+  SpreadsheetApp.getUi().alert('SCOOT Invoices tab created!\n\nPaste your SCOOT invoice data starting at row 5.\nThen run "Verify SCOOT Invoices" from the menu.');
+}
+
+/**
+ * Reads SCOOT invoices and check-in data, cross-references, and writes a verification report.
+ */
+function verifyScootInvoices() {
+  var ss = SpreadsheetApp.openById(HOURS_VERIFICATION_ID);
+
+  // Step 1: Read SCOOT invoices
+  var invTab = ss.getSheetByName(SCOOT_INVOICE_TAB);
+  if (!invTab) {
+    SpreadsheetApp.getUi().alert('No "' + SCOOT_INVOICE_TAB + '" tab found.\n\nRun "Setup SCOOT Invoice Tab" first, then paste your data.');
+    return;
+  }
+
+  var invData = invTab.getDataRange().getValues();
+  var invoices = [];
+  for (var i = 4; i < invData.length; i++) {
+    var row = invData[i];
+    var school = String(row[3] || '').trim();
+    var dateVal = row[2];
+    var amount = parseFloat(String(row[4] || '').replace(/[$,]/g, ''));
+    var invNum = String(row[1] || '').trim();
+    var status = String(row[0] || '').trim();
+
+    if (!school || isNaN(amount)) continue;
+
+    var dt = parseDate(dateVal);
+    var dateStr = dt ? formatDt(dt) : String(dateVal);
+
+    invoices.push({
+      school: school,
+      date: dt,
+      dateStr: dateStr,
+      amount: amount,
+      invNum: invNum,
+      status: status
+    });
+  }
+
+  if (invoices.length === 0) {
+    SpreadsheetApp.getUi().alert('No valid invoice data found.\n\nMake sure columns match: Paid Status | Invoice # | Invoice Date | School | Amount');
+    return;
+  }
+
+  // Step 2: Load SCOOT check-ins for the invoice date range
+  var minDate = null, maxDate = null;
+  for (var i = 0; i < invoices.length; i++) {
+    if (invoices[i].date) {
+      if (!minDate || invoices[i].date < minDate) minDate = invoices[i].date;
+      if (!maxDate || invoices[i].date > maxDate) maxDate = invoices[i].date;
+    }
+  }
+  // Expand range by a week on each side
+  var startDate = new Date(minDate.getTime() - 7 * 86400000);
+  var endDate = new Date(maxDate.getTime() + 7 * 86400000);
+  endDate.setHours(23, 59, 59);
+
+  // Load check-ins
+  var allCheckIns = [];
+  var ciSS = SpreadsheetApp.openById(CHECKINS_ID);
+  var ciSheets = ciSS.getSheets();
+  for (var s = 0; s < ciSheets.length; s++) {
+    var sheet = ciSheets[s];
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) continue;
+    var hdrRow = -1, hdr = [];
+    for (var h = 0; h < Math.min(20, data.length); h++) {
+      var rowStr = data[h].map(function(c) { return String(c).toLowerCase().trim(); });
+      for (var cc = 0; cc < rowStr.length; cc++) {
+        if (rowStr[cc].indexOf('leader name') >= 0) { hdrRow = h; hdr = rowStr; break; }
+      }
+      if (hdrRow >= 0) break;
+    }
+    if (hdrRow === -1) continue;
+    var cLeader = findCol(hdr, ['leader name']);
+    var cDate = findCol(hdr, ['date']);
+    var cStatus = findCol(hdr, ['status']);
+    var cSchool = findCol(hdr, ['school']);
+    var cWorkshop = findCol(hdr, ['workshop']);
+    if (cLeader === -1 || cStatus === -1) continue;
+
+    for (var i = hdrRow + 1; i < data.length; i++) {
+      var row = data[i];
+      var leader = getVal(row, cLeader);
+      var status = getVal(row, cStatus).toLowerCase().trim();
+      var school = getVal(row, cSchool);
+      if (!leader || status !== 'scoot') continue;
+
+      var dt = null;
+      if (cDate !== -1 && row[cDate]) dt = parseDate(row[cDate]);
+      if (dt && (dt < startDate || dt > endDate)) continue;
+
+      allCheckIns.push({
+        leader: leader,
+        school: school,
+        workshop: getVal(row, cWorkshop),
+        date: dt,
+        dateStr: dt ? formatDt(dt) : 'N/A'
+      });
+    }
+  }
+
+  // Step 3: Build check-in lookup by date+school
+  var ciByDateSchool = {};
+  for (var i = 0; i < allCheckIns.length; i++) {
+    var ci = allCheckIns[i];
+    var key = (ci.dateStr + '|' + ci.school).toLowerCase().replace(/[^a-z0-9|]/g, '');
+    if (!ciByDateSchool[key]) ciByDateSchool[key] = [];
+    ciByDateSchool[key].push(ci);
+  }
+
+  // Step 4: Match invoices to check-ins
+  var results = [];
+  var matched = 0, unmatched = 0;
+
+  for (var i = 0; i < invoices.length; i++) {
+    var inv = invoices[i];
+    var key = (inv.dateStr + '|' + inv.school).toLowerCase().replace(/[^a-z0-9|]/g, '');
+
+    // Try exact match first
+    var sessions = ciByDateSchool[key] || [];
+
+    // If no exact match, try fuzzy school name match on same date
+    if (sessions.length === 0) {
+      var invSchoolNorm = inv.school.toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (var k in ciByDateSchool) {
+        if (k.indexOf(inv.dateStr.toLowerCase().replace(/[^a-z0-9]/g, '')) === 0) {
+          var ciSchoolPart = k.split('|')[1] || '';
+          if (ciSchoolPart.indexOf(invSchoolNorm) >= 0 || invSchoolNorm.indexOf(ciSchoolPart) >= 0) {
+            sessions = ciByDateSchool[k];
+            break;
+          }
+        }
+      }
+    }
+
+    var sessionCount = sessions.length;
+    var leaders = [];
+    for (var j = 0; j < sessions.length; j++) {
+      if (leaders.indexOf(sessions[j].leader) === -1) leaders.push(sessions[j].leader);
+    }
+
+    var matchStatus;
+    if (sessionCount === 0) {
+      matchStatus = 'NO MATCH — not in our check-ins';
+      unmatched++;
+    } else {
+      matchStatus = 'MATCHED — ' + sessionCount + ' session(s)';
+      matched++;
+    }
+
+    results.push({
+      invDate: inv.dateStr,
+      invSchool: inv.school,
+      invAmount: inv.amount,
+      invNum: inv.invNum,
+      invStatus: inv.status,
+      sessions: sessionCount,
+      leaders: leaders.join(', '),
+      matchStatus: matchStatus
+    });
+  }
+
+  // Step 5: Find check-ins with NO matching invoice
+  var ciUsedKeys = {};
+  for (var i = 0; i < invoices.length; i++) {
+    var inv = invoices[i];
+    var key = (inv.dateStr + '|' + inv.school).toLowerCase().replace(/[^a-z0-9|]/g, '');
+    ciUsedKeys[key] = true;
+  }
+
+  var unbilledSessions = [];
+  for (var k in ciByDateSchool) {
+    if (!ciUsedKeys[k]) {
+      var sessions = ciByDateSchool[k];
+      for (var j = 0; j < sessions.length; j++) {
+        unbilledSessions.push(sessions[j]);
+      }
+    }
+  }
+
+  // Step 6: Write verification report
+  var rptTabName = 'SCOOT Invoice Verify';
+  var rpt = ss.getSheetByName(rptTabName);
+  if (!rpt) { rpt = ss.insertSheet(rptTabName); } else { rpt.clear(); rpt.clearFormats(); }
+
+  rpt.getRange(1, 1).setValue('SCOOT INVOICE VERIFICATION');
+  rpt.getRange(1, 1, 1, 8).merge().setFontSize(14).setFontWeight('bold')
+    .setBackground('#ff6d01').setFontColor('#ffffff');
+
+  rpt.getRange(2, 1).setValue('Generated: ' + new Date().toLocaleString() + ' | Invoices: ' + invoices.length + ' | Matched: ' + matched + ' | No Match: ' + unmatched + ' | Unbilled sessions: ' + unbilledSessions.length);
+  rpt.getRange(2, 1, 1, 8).merge().setFontColor('#666666');
+
+  // Section 1: Invoice comparison
+  var headers = ['Invoice Date', 'School', 'Invoice Amount', 'Invoice #', 'Paid Status', 'Our Sessions', 'SCOOT Leader(s)', 'Verification'];
+  rpt.getRange(4, 1, 1, 8).setValues([headers]).setFontWeight('bold').setBackground('#e8eaed');
+
+  var rData = [];
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    rData.push([r.invDate, r.invSchool, '$' + r.invAmount.toFixed(2), r.invNum, r.invStatus, r.sessions, r.leaders, r.matchStatus]);
+  }
+
+  if (rData.length > 0) {
+    rpt.getRange(5, 1, rData.length, 8).setValues(rData);
+    // Highlight unmatched rows red
+    for (var i = 0; i < results.length; i++) {
+      if (results[i].sessions === 0) {
+        rpt.getRange(5 + i, 1, 1, 8).setBackground('#fce8e6').setFontColor('#d93025');
+      } else {
+        rpt.getRange(5 + i, 1, 1, 8).setBackground('#e6f4ea');
+      }
+    }
+  }
+
+  // Section 2: Unbilled sessions (in our records but no invoice)
+  var ubStart = 5 + rData.length + 2;
+  rpt.getRange(ubStart, 1).setValue('SCOOT SESSIONS WITH NO MATCHING INVOICE (' + unbilledSessions.length + ')');
+  rpt.getRange(ubStart, 1, 1, 5).merge().setFontSize(12).setFontWeight('bold').setBackground('#fbbc04');
+
+  if (unbilledSessions.length > 0) {
+    rpt.getRange(ubStart + 1, 1, 1, 5).setValues([['Date', 'School', 'Leader', 'Workshop', 'Note']]).setFontWeight('bold').setBackground('#e8eaed');
+    var ubData = [];
+    for (var i = 0; i < unbilledSessions.length; i++) {
+      var s = unbilledSessions[i];
+      ubData.push([s.dateStr, s.school, s.leader, s.workshop, 'No invoice found']);
+    }
+    rpt.getRange(ubStart + 2, 1, ubData.length, 5).setValues(ubData);
+  } else {
+    rpt.getRange(ubStart + 1, 1).setValue('All SCOOT sessions have matching invoices.');
+    rpt.getRange(ubStart + 1, 1, 1, 5).merge().setFontColor('#666666');
+  }
+
+  for (var c = 1; c <= 8; c++) rpt.autoResizeColumn(c);
+  rpt.setFrozenRows(4);
+
+  SpreadsheetApp.getUi().alert('SCOOT Invoice Verification Complete!\n\n' +
+    'Invoices checked: ' + invoices.length + '\n' +
+    'Matched: ' + matched + '\n' +
+    'No match (potential overbilling): ' + unmatched + '\n' +
+    'Unbilled sessions: ' + unbilledSessions.length + '\n\n' +
+    '→ Check "SCOOT Invoice Verify" tab');
 }
