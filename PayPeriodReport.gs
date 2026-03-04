@@ -19,9 +19,10 @@ var OPS_HUB_SHEET_NAME = 'Winter/Spring 26';
 
 var ACTIVE_STATUSES = ['leader', 'co-lead', 'onboard', 'sub'];
 var ABSENT_STATUSES = ['absent'];
+var BUFFER_MINUTES = 30;
 
-// Column count in output (A-J)
-var NUM_COLS = 10;
+// Column count in output (A-K)
+var NUM_COLS = 11;
 
 /* ═══════════════════════ Menu & Triggers ═══════════════════════ */
 
@@ -910,8 +911,10 @@ function aggregateByLeader_(sessions, absences, durationMap) {
     }
 
     var dur = lookupDuration_(s.school, s.workshop, durationMap);
+    s.durMinutes = dur.minutes;
+    s.durMatched = dur.matched;
     leaders[key].sessions.push(s);
-    leaders[key].totalMinutes += dur.minutes;
+    leaders[key].totalMinutes += dur.minutes + BUFFER_MINUTES;
     leaders[key].dates[s.dateStr] = true;
 
     var cleanWS = s.workshop
@@ -1038,7 +1041,8 @@ function writeReport_(sheet, leaderData, payStart, payEnd) {
   var headers = [
     'Leader Name', 'Total Sessions', 'Total Hours', 'Total Minutes',
     'Dates Taught', 'Workshops & Schools', 'Back-to-Back Details',
-    'Check-In Summary', 'Absences in Period', 'Action Needed'
+    'Check-In Summary', 'Absences in Period', 'Action Needed',
+    'Daily Hours Breakdown'
   ];
   sheet.getRange(3, 1, 1, NUM_COLS).setValues([headers]);
   sheet.getRange(3, 1, 1, NUM_COLS).setFontWeight('bold').setBackground('#4a86c8').setFontColor('#ffffff');
@@ -1074,6 +1078,7 @@ function writeReport_(sheet, leaderData, payStart, payEnd) {
     var backToBack = detectBackToBack_(leader.sessions);
     var ciResult = buildCheckInSummary_(leader.checkIns);
     var absencesStr = leader.absences.length > 0 ? leader.absences.join('; ') : 'None';
+    var dailyBreakdown = buildDailyBreakdown_(leader.sessions);
 
     // Display name: append merged aliases if any
     var displayName = leader.name;
@@ -1103,7 +1108,7 @@ function writeReport_(sheet, leaderData, payStart, payEnd) {
     rows.push([
       displayName, totalSessions, totalHours, totalMinutes,
       dates, workshopsSchools, backToBack,
-      ciResult.text, absencesStr, actionStr
+      ciResult.text, absencesStr, actionStr, dailyBreakdown
     ]);
     colors.push(rowColor);
   }
@@ -1131,14 +1136,71 @@ function writeReport_(sheet, leaderData, payStart, payEnd) {
   // Freeze top 3 rows
   sheet.setFrozenRows(3);
 
+  // Wrap text for daily breakdown column (col 11)
+  if (rows.length > 0) {
+    sheet.getRange(4, 11, rows.length, 1).setWrap(true);
+  }
+
   // Auto-resize columns
   for (var c = 1; c <= NUM_COLS; c++) {
     sheet.autoResizeColumn(c);
   }
+  sheet.setColumnWidth(11, 420); // Daily Hours Breakdown column needs more room
 
   // Set filter on data range
   var dataRange = sheet.getRange(3, 1, rows.length + 1, NUM_COLS);
   var existingFilter = sheet.getFilter();
   if (existingFilter) existingFilter.remove();
   dataRange.createFilter();
+}
+
+/* ═══════════════════════ Daily Hours Breakdown ═══════════════════════ */
+
+/**
+ * Builds a per-day breakdown string showing workshop duration + 30-min buffer per session.
+ * Example output:
+ *   2/17: Mini Robotics @ Sinai Akiba Academy (60min + 30min = 90min)
+ *   2/18: Mixed Media Artists @ Sinai Akiba Academy (60min + 30min = 90min)
+ */
+function buildDailyBreakdown_(sessions) {
+  var byDate = {};
+  var dateOrder = [];
+
+  for (var i = 0; i < sessions.length; i++) {
+    var s = sessions[i];
+    if (!byDate[s.dateStr]) {
+      byDate[s.dateStr] = [];
+      dateOrder.push(s.dateStr);
+    }
+    byDate[s.dateStr].push(s);
+  }
+
+  dateOrder.sort(function(a, b) {
+    return new Date('2026/' + a) - new Date('2026/' + b);
+  });
+
+  var parts = [];
+  for (var d = 0; d < dateOrder.length; d++) {
+    var date = dateOrder[d];
+    var daySessions = byDate[date];
+    var dayParts = [];
+    var dayTotal = 0;
+
+    for (var s2 = 0; s2 < daySessions.length; s2++) {
+      var sess = daySessions[s2];
+      var dur = sess.durMinutes || 60;
+      var total = dur + BUFFER_MINUTES;
+      dayTotal += total;
+      var cleanWS = sess.workshop.replace(/\(Wk\s*\d+\)/gi, '').replace(/\(Week\s*\d+\)/gi, '').trim();
+      dayParts.push(cleanWS + ' @ ' + sess.school + ' (' + dur + 'min + ' + BUFFER_MINUTES + 'min buffer = ' + total + 'min)');
+    }
+
+    var daySummary = date + ': ' + dayParts.join(' + ');
+    if (daySessions.length > 1) {
+      daySummary += ' → Day total: ' + dayTotal + 'min';
+    }
+    parts.push(daySummary);
+  }
+
+  return parts.join('\n');
 }
